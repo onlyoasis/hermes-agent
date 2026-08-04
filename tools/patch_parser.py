@@ -78,17 +78,26 @@ def parse_v4a_patch(patch_content: str) -> Tuple[List[PatchOperation], Optional[
         - If successful: (list_of_operations, None)
         - If failed: ([], error_description)
     """
-    lines = patch_content.split('\n')
+    # Split into lines, tolerating a CRLF patch body: strip the trailing
+    # ``\r`` from each line. Without this, a CRLF-encoded patch keeps ``\r``
+    # inside every HunkLine.content and injects stray carriage returns into an
+    # LF target file (and the anchored ``...\s*$`` Begin/End markers would fail
+    # to match because of the trailing ``\r``).
+    lines = [ln[:-1] if ln.endswith('\r') else ln for ln in patch_content.split('\n')]
     operations: List[PatchOperation] = []
-    
-    # Find patch boundaries
+
+    # Find patch boundaries. Markers must occupy the whole line at column 0:
+    # content lines like "+*** End Patch" or " *** End Patch" (e.g. docs
+    # about the patch format) must not truncate the patch or reset the
+    # start boundary.
     start_idx = None
     end_idx = None
-    
+    begin_marker = re.compile(r'^\*\*\*\s*Begin\s+Patch\s*$')
+    end_marker = re.compile(r'^\*\*\*\s*End\s+Patch\s*$')
     for i, line in enumerate(lines):
-        if '*** Begin Patch' in line or '***Begin Patch' in line:
+        if begin_marker.match(line):
             start_idx = i
-        elif '*** End Patch' in line or '***End Patch' in line:
+        elif end_marker.match(line):
             end_idx = i
             break
     
@@ -253,17 +262,45 @@ def _validate_operations(
     from tools.fuzzy_match import fuzzy_find_and_replace
 
     errors: List[str] = []
+    real_change_count = 0
+
+    # Virtual filesystem overlay so inter-op state (notably a MOVE creating the
+    # destination a later UPDATE targets) validates correctly. Maps a path to
+    # its pending content; ``None`` marks a path moved/deleted away. UPDATE and
+    # MOVE reads consult this overlay before hitting disk.
+    pending_content: dict = {}   # path -> content produced by an earlier op
+    removed_paths: set = set()   # paths a MOVE/DELETE has taken away
+
+    def _read(path: str):
+        """Read a path honoring the pending-move overlay."""
+        if path in removed_paths and path not in pending_content:
+            return None, "file not found"
+        if path in pending_content:
+            return pending_content[path], None
+        r = file_ops.read_file_raw(path)
+        if r.error:
+            return None, r.error
+        return r.content, None
 
     for op in operations:
+        if op.operation != OperationType.UPDATE:
+            real_change_count += 1
         if op.operation == OperationType.UPDATE:
-            read_result = file_ops.read_file_raw(op.file_path)
-            if read_result.error:
-                errors.append(f"{op.file_path}: {read_result.error}")
+            content, read_err = _read(op.file_path)
+            if read_err:
+                errors.append(f"{op.file_path}: {read_err}")
                 continue
 
-            simulated = read_result.content
-            for hunk in op.hunks:
-                search_lines = [l.content for l in hunk.lines if l.prefix in (' ', '-')]
+            simulated = content
+            for hunk_index, hunk in enumerate(op.hunks, start=1):
+                search_lines = [l.content for l in hunk.lines if l.prefix in {' ', '-'}]
+                removed_lines = [l.content for l in hunk.lines if l.prefix == '-']
+                added_lines = [l.content for l in hunk.lines if l.prefix == '+']
+                if not removed_lines and not added_lines:
+                    # Models occasionally emit inert anchor hunks between real
+                    # changes. Ignore them without poisoning the atomic patch.
+                    continue
+                real_change_count += 1
                 if not search_lines:
                     # Addition-only hunk: validate context hint uniqueness
                     if hunk.context_hint:
@@ -282,42 +319,73 @@ def _validate_operations(
                     continue
 
                 search_pattern = '\n'.join(search_lines)
-                replace_lines = [l.content for l in hunk.lines if l.prefix in (' ', '+')]
+                replace_lines = [l.content for l in hunk.lines if l.prefix in {' ', '+'}]
                 replacement = '\n'.join(replace_lines)
 
                 new_simulated, count, _strategy, match_error = fuzzy_find_and_replace(
                     simulated, search_pattern, replacement, replace_all=False
                 )
                 if count == 0:
+                    # Already-applied hunk: validate as a no-op when the
+                    # replacement text is already present (and the search
+                    # text gone) — the edit landed earlier. Keeps multi-hunk
+                    # patches from failing wholesale because one hunk was
+                    # already applied in a prior call. The apply phase
+                    # performs the same skip.
+                    from tools.fuzzy_match import is_already_applied
+                    if is_already_applied(simulated or "", search_pattern, replacement):
+                        continue
                     label = f"'{hunk.context_hint}'" if hunk.context_hint else "(no hint)"
-                    errors.append(
-                        f"{op.file_path}: hunk {label} not found"
+                    msg = (
+                        f"{op.file_path}: hunk {hunk_index} {label} not found"
                         + (f" — {match_error}" if match_error else "")
                     )
+                    try:
+                        from tools.fuzzy_match import format_no_match_hint
+                        msg += format_no_match_hint(match_error, count, search_pattern, simulated)
+                    except Exception:
+                        pass
+                    errors.append(msg)
                 else:
                     # Advance simulation so subsequent hunks validate correctly.
                     # Reuse the result from the call above — no second fuzzy run.
                     simulated = new_simulated
+            # Record the post-update content so a later op (e.g. a MOVE of this
+            # file) sees the edited version in the overlay.
+            pending_content[op.file_path] = simulated
 
         elif op.operation == OperationType.DELETE:
-            read_result = file_ops.read_file_raw(op.file_path)
-            if read_result.error:
+            _content, read_err = _read(op.file_path)
+            if read_err:
                 errors.append(f"{op.file_path}: file not found for deletion")
+            else:
+                removed_paths.add(op.file_path)
+                pending_content.pop(op.file_path, None)
 
         elif op.operation == OperationType.MOVE:
             if not op.new_path:
                 errors.append(f"{op.file_path}: MOVE operation missing destination path")
                 continue
-            src_result = file_ops.read_file_raw(op.file_path)
-            if src_result.error:
+            src_content, src_err = _read(op.file_path)
+            if src_err:
                 errors.append(f"{op.file_path}: source file not found for move")
-            dst_result = file_ops.read_file_raw(op.new_path)
-            if not dst_result.error:
+            dst_content, dst_err = _read(op.new_path)
+            if not dst_err:
                 errors.append(
                     f"{op.new_path}: destination already exists — move would overwrite"
                 )
+            # Reflect the move in the overlay so a subsequent UPDATE of the
+            # destination validates against the moved content, and the source
+            # reads as gone. Only when the move itself validated cleanly.
+            if not src_err and dst_err:
+                pending_content[op.new_path] = src_content if src_content is not None else ""
+                pending_content.pop(op.file_path, None)
+                removed_paths.add(op.file_path)
 
         # ADD: parent directory creation handled by write_file; no pre-check needed.
+
+    if not errors and real_change_count == 0:
+        errors.append("Patch contains no changes (only context lines were provided)")
 
     return errors
 
@@ -357,6 +425,12 @@ def apply_v4a_operations(operations: List[PatchOperation],
     files_created = []
     files_deleted = []
     all_diffs = []
+    # Per-file LSP diagnostics blocks captured from underlying write_file
+    # calls.  V4A bypasses the WriteResult / PatchResult plumbing that
+    # write_file and patch_replace use, so without explicit propagation
+    # the LSP tier's output gets silently dropped — see
+    # ``PatchResult.lsp_diagnostics`` aggregation below.
+    lsp_blocks: List[str] = []
     errors = []
 
     for op in operations:
@@ -366,6 +440,8 @@ def apply_v4a_operations(operations: List[PatchOperation],
                 if result[0]:
                     files_created.append(op.file_path)
                     all_diffs.append(result[1])
+                    if result[2]:
+                        lsp_blocks.append(result[2])
                 else:
                     errors.append(f"Failed to add {op.file_path}: {result[1]}")
 
@@ -390,6 +466,8 @@ def apply_v4a_operations(operations: List[PatchOperation],
                 if result[0]:
                     files_modified.append(op.file_path)
                     all_diffs.append(result[1])
+                    if result[2]:
+                        lsp_blocks.append(result[2])
                 else:
                     errors.append(f"Failed to update {op.file_path}: {result[1]}")
 
@@ -405,6 +483,13 @@ def apply_v4a_operations(operations: List[PatchOperation],
 
     combined_diff = '\n'.join(all_diffs)
 
+    # Combine per-file LSP diagnostics blocks.  Each block already has
+    # the ``<diagnostics file="...">`` header from
+    # ``LSPService.report_for_file`` so concatenation is safe — the
+    # agent (and any downstream parsers) can still attribute each
+    # diagnostic to its file.
+    combined_lsp = "\n\n".join(lsp_blocks) if lsp_blocks else None
+
     if errors:
         return PatchResult(
             success=False,
@@ -413,6 +498,7 @@ def apply_v4a_operations(operations: List[PatchOperation],
             files_created=files_created,
             files_deleted=files_deleted,
             lint=lint_results if lint_results else None,
+            lsp_diagnostics=combined_lsp,
             error="Apply phase failed (state may be inconsistent — run `git diff` to assess):\n"
                   + "\n".join(f"  • {e}" for e in errors),
         )
@@ -424,11 +510,19 @@ def apply_v4a_operations(operations: List[PatchOperation],
         files_created=files_created,
         files_deleted=files_deleted,
         lint=lint_results if lint_results else None,
+        lsp_diagnostics=combined_lsp,
     )
 
 
-def _apply_add(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
-    """Apply an add file operation."""
+def _apply_add(op: PatchOperation, file_ops: Any) -> Tuple[bool, str, Optional[str]]:
+    """Apply an add file operation.
+
+    Returns ``(success, diff_or_error, lsp_diagnostics)``.  The third
+    element carries the formatted ``<diagnostics>`` block from
+    :class:`WriteResult.lsp_diagnostics` so V4A patches can surface
+    semantic diagnostics from the LSP layer — without this, the LSP
+    tier would silently swallow them on the V4A code path.
+    """
     # Extract content from hunks (all + lines)
     content_lines = []
     for hunk in op.hunks:
@@ -440,12 +534,12 @@ def _apply_add(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     
     result = file_ops.write_file(op.file_path, content)
     if result.error:
-        return False, result.error
+        return False, result.error, None
     
     diff = f"--- /dev/null\n+++ b/{op.file_path}\n"
     diff += '\n'.join(f"+{line}" for line in content_lines)
     
-    return True, diff
+    return True, diff, getattr(result, "lsp_diagnostics", None)
 
 
 def _apply_delete(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
@@ -479,8 +573,12 @@ def _apply_move(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     return True, diff
 
 
-def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
-    """Apply an update file operation."""
+def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str, Optional[str]]:
+    """Apply an update file operation.
+
+    Returns ``(success, diff_or_error, lsp_diagnostics)`` — see
+    :func:`_apply_add` for the rationale on the third element.
+    """
     # Deferred import: breaks the patch_parser ↔ fuzzy_match circular dependency
     from tools.fuzzy_match import fuzzy_find_and_replace
 
@@ -488,7 +586,7 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     read_result = file_ops.read_file_raw(op.file_path)
 
     if read_result.error:
-        return False, f"Cannot read file: {read_result.error}"
+        return False, f"Cannot read file: {read_result.error}", None
 
     current_content = read_result.content
 
@@ -509,6 +607,8 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
             elif line.prefix == '+':
                 replace_lines.append(line.content)
 
+        if search_lines and search_lines == replace_lines:
+            continue
         if search_lines:
             search_pattern = '\n'.join(search_lines)
             replacement = '\n'.join(replace_lines)
@@ -537,7 +637,20 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
                             error = None
                 
                 if error:
-                    return False, f"Could not apply hunk: {error}"
+                    # Already-applied hunk: skip it, mirroring the
+                    # validation-phase check (validation may also have
+                    # passed via this path, so apply MUST skip too or the
+                    # two phases disagree and the whole patch fails here).
+                    from tools.fuzzy_match import is_already_applied
+                    if is_already_applied(new_content, search_pattern, replacement):
+                        continue
+                    err_msg = f"Could not apply hunk: {error}"
+                    try:
+                        from tools.fuzzy_match import format_no_match_hint
+                        err_msg += format_no_match_hint(error, 0, search_pattern, new_content)
+                    except Exception:
+                        pass
+                    return False, err_msg, None
         else:
             # Addition-only hunk (no context or removed lines).
             # Insert at the location indicated by the context hint, or at end of file.
@@ -551,7 +664,7 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
                     return False, (
                         f"Addition-only hunk: context hint '{hunk.context_hint}' is ambiguous "
                         f"({occurrences} occurrences) — provide a more unique hint"
-                    )
+                    ), None
                 else:
                     hint_pos = new_content.find(hunk.context_hint)
                     # Insert after the line containing the context hint
@@ -566,7 +679,7 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     # Write new content
     write_result = file_ops.write_file(op.file_path, new_content)
     if write_result.error:
-        return False, write_result.error
+        return False, write_result.error, None
     
     # Generate diff
     diff_lines = difflib.unified_diff(
@@ -577,4 +690,4 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     )
     diff = ''.join(diff_lines)
     
-    return True, diff
+    return True, diff, getattr(write_result, "lsp_diagnostics", None)
