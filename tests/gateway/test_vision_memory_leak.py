@@ -50,5 +50,7 @@ class TestEnrichMessageWithVision:
         with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=fake_result)):
             out = _run(gateway_runner._enrich_message_with_vision("caption", ["/tmp/img.jpg"]))
         assert "photograph of a dog" in out
+        assert "Automatic vision analysis succeeded" in out
+        assert "Here's what I can see" not in out
         assert "fenced leak" not in out
         assert "<memory-context>" not in out

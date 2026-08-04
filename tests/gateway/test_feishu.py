@@ -1056,6 +1056,41 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertIn("第一张", event.text)
         self.assertIn("第二张", event.text)
 
+    @patch.dict(os.environ, {}, clear=True)
+    def test_media_batch_merges_photo_and_audio_from_same_dm_burst(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import MessageEvent, MessageType
+        from gateway.session import SessionSource
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        source = SessionSource(
+            platform=adapter.platform,
+            chat_id="oc_chat",
+            chat_type="dm",
+            user_id="ou_user",
+        )
+        photo = MessageEvent(
+            text="",
+            message_type=MessageType.PHOTO,
+            source=source,
+            media_urls=["/tmp/a.png"],
+            media_types=["image/png"],
+        )
+        audio = MessageEvent(
+            text="",
+            message_type=MessageType.AUDIO,
+            source=source,
+            media_urls=["/tmp/a.m4a"],
+            media_types=["audio/mp4"],
+        )
+
+        self.assertEqual(adapter._media_batch_key(photo), adapter._media_batch_key(audio))
+        self.assertTrue(adapter._media_batch_is_compatible(photo, audio))
+        photo.media_urls.extend(audio.media_urls)
+        photo.media_types.extend(audio.media_types)
+        self.assertLessEqual(adapter._media_batch_delay_for_event(photo), 0.8)
+
 
     def test_download_remote_document_reads_response_before_httpx_client_closes(self):
         """#18451 — snapshot Content-Type + body while the httpx.AsyncClient
@@ -2465,5 +2500,4 @@ class TestChatLockEviction(unittest.TestCase):
 
         adapter = self._make_adapter()
         self.assertIsInstance(adapter._chat_locks, _collections.OrderedDict)
-
 

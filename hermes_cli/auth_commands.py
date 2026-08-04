@@ -409,6 +409,7 @@ def auth_add_command(args) -> None:
 
     if provider == "minimax-oauth":
         creds = auth_mod._minimax_oauth_login(
+            region=getattr(args, "region", None) or "global",
             open_browser=not getattr(args, "no_browser", False),
             timeout_seconds=getattr(args, "timeout", None) or 15.0,
         )

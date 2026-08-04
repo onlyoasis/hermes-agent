@@ -227,6 +227,24 @@ def test_normalize_codex_response_treats_summary_only_reasoning_as_incomplete():
     assert assistant_message.codex_reasoning_items is None
 
 
+def test_normalize_codex_response_empty_output_ignores_broken_output_text_property():
+    response = SimpleNamespace(
+        status="completed",
+        output=[],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2),
+    )
+
+    class _BrokenOutputText(type(response)):
+        @property
+        def output_text(self):
+            raise TypeError("'NoneType' object is not iterable")
+
+    broken = _BrokenOutputText(**response.__dict__)
+
+    with pytest.raises(RuntimeError, match=r"^Responses API returned no output items$"):
+        _normalize_codex_response(broken)
+
+
 
 
 # ---------------------------------------------------------------------------

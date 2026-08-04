@@ -46,9 +46,9 @@ from plugins.platforms.feishu.adapter import FeishuAdapter
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_adapter() -> FeishuAdapter:
+def _make_adapter(extra: dict | None = None) -> FeishuAdapter:
     """Create a FeishuAdapter with mocked internals."""
-    config = PlatformConfig(enabled=True)
+    config = PlatformConfig(enabled=True, extra=extra or {})
     adapter = FeishuAdapter(config)
     adapter._client = MagicMock()
     return adapter
@@ -59,16 +59,22 @@ def _make_card_action_data(
     chat_id: str = "oc_12345",
     open_id: str = "ou_user1",
     token: str = "tok_abc",
+    form_value: dict | None = None,
+    open_message_id: str = "",
 ) -> SimpleNamespace:
     """Create a mock Feishu card action callback data object."""
     return SimpleNamespace(
         event=SimpleNamespace(
             token=token,
-            context=SimpleNamespace(open_chat_id=chat_id),
+            context=SimpleNamespace(
+                open_chat_id=chat_id,
+                open_message_id=open_message_id,
+            ),
             operator=SimpleNamespace(open_id=open_id),
             action=SimpleNamespace(
                 tag="button",
                 value=action_value,
+                form_value=form_value or {},
             ),
         ),
     )
@@ -237,6 +243,98 @@ class TestResolveApproval:
         assert 5 in adapter._approval_state
 
 
+class TestFeishuSlashConfirm:
+    """Test slash-command confirmations use Feishu interactive cards."""
+
+    @pytest.mark.asyncio
+    async def test_sends_interactive_card_and_stores_state(self):
+        adapter = _make_adapter()
+        mock_response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="msg_confirm_001"),
+        )
+        with (
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"type": "dm"},
+            ),
+            patch.object(
+                adapter,
+                "_feishu_send_with_retry",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ) as mock_send,
+        ):
+            result = await adapter.send_slash_confirm(
+                chat_id="oc_12345",
+                title="/new",
+                message="This starts a fresh session.",
+                session_key="agent:main:feishu:direct:oc_12345",
+                confirm_id="confirm-1",
+            )
+
+        assert result.success is True
+        card = json.loads(mock_send.call_args.kwargs["payload"])
+        actions = card["elements"][1]["actions"]
+        assert [
+            action["value"]["hermes_slash_confirm_action"] for action in actions
+        ] == ["once", "always", "cancel"]
+        assert adapter._slash_confirm_state["confirm-1"] == {
+            "session_key": "agent:main:feishu:direct:oc_12345",
+            "chat_id": "oc_12345",
+            "chat_type": "dm",
+        }
+
+    @pytest.mark.asyncio
+    async def test_paired_user_resolves_and_receives_follow_up(self):
+        adapter = _make_adapter()
+
+        class Runner:
+            def _is_user_authorized(self, source):
+                return (
+                    source.platform.value == "feishu"
+                    and source.user_id == "ou_paired"
+                )
+
+            async def handle(self, _event):
+                return None
+
+        adapter._message_handler = Runner().handle
+        adapter._slash_confirm_state["confirm-2"] = {
+            "session_key": "agent:main:feishu:direct:oc_12345",
+            "chat_id": "oc_12345",
+            "chat_type": "dm",
+        }
+
+        with (
+            patch(
+                "tools.slash_confirm.resolve",
+                new=AsyncMock(return_value="Session reset."),
+            ) as mock_resolve,
+            patch.object(adapter, "send", new_callable=AsyncMock) as mock_send,
+        ):
+            await adapter._resolve_slash_confirm(
+                "confirm-2",
+                "once",
+                "Paired User",
+                open_id="ou_paired",
+                chat_id="oc_12345",
+            )
+
+        mock_resolve.assert_awaited_once_with(
+            "agent:main:feishu:direct:oc_12345",
+            "confirm-2",
+            "once",
+        )
+        mock_send.assert_awaited_once_with(
+            "oc_12345",
+            "Session reset.",
+            metadata=None,
+        )
+
+
 # ===========================================================================
 # _handle_card_action_event — non-approval card actions
 # ===========================================================================
@@ -266,6 +364,96 @@ class TestNonApprovalCardAction:
         mock_handle.assert_called_once()
         event = mock_handle.call_args[0][0]
         assert "/card button" in event.text
+
+    @pytest.mark.asyncio
+    async def test_routes_form_values_and_source_message_id(self):
+        adapter = _make_adapter()
+        data = _make_card_action_data(
+            action_value={"hermes_card_action": "daily_review_submit"},
+            form_value={"completed": "done", "state": "稳定"},
+            token="tok_form",
+            open_message_id="om_card_message",
+        )
+
+        with (
+            patch.object(
+                adapter,
+                "_resolve_sender_profile",
+                new_callable=AsyncMock,
+                return_value={
+                    "user_id": "ou_u",
+                    "user_name": "Dave",
+                    "user_id_alt": None,
+                },
+            ),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"name": "Test Chat"},
+            ),
+            patch.object(
+                adapter, "_handle_message_with_guards", new_callable=AsyncMock
+            ) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        event = mock_handle.call_args[0][0]
+        assert event.message_id == "om_card_message"
+        payload = json.loads(event.text.split(" ", 2)[2])
+        assert payload["action_id"] == "daily_review_submit"
+        assert payload["open_chat_id"] == "oc_12345"
+        assert payload["form_value"]["completed"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_configured_card_action_runs_profile_script(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "profile-home"
+        scripts_dir = hermes_home / "scripts"
+        scripts_dir.mkdir(parents=True)
+        handler = scripts_dir / "card_handler.py"
+        handler.write_text(
+            "\n".join(
+                [
+                    "import json, sys",
+                    "payload = json.loads(sys.stdin.read() or '{}')",
+                    "print(json.dumps({'messages': [{'chat_id': payload['open_chat_id'], 'text': 'saved:' + payload['form_value']['completed'] + ':' + payload['operator_open_id'] + ':' + payload['card_action_token']}]}))",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        adapter = _make_adapter(
+            {
+                "card_action_handlers": {
+                    "daily_review_submit": {"script": "card_handler.py"}
+                },
+                "group_rules": {
+                    "oc_12345": {
+                        "policy": "allowlist",
+                        "allowlist": ["ou_user1"],
+                    }
+                },
+            }
+        )
+        data = _make_card_action_data(
+            action_value={"hermes_card_action": "daily_review_submit"},
+            form_value={"completed": "done"},
+        )
+
+        with (
+            patch.object(adapter, "send", new_callable=AsyncMock) as mock_send,
+            patch.object(
+                adapter, "_handle_message_with_guards", new_callable=AsyncMock
+            ) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        mock_send.assert_awaited_once_with(
+            "oc_12345", "saved:done:ou_user1:tok_abc", metadata=None
+        )
+        mock_handle.assert_not_called()
 
 
 # ===========================================================================
@@ -304,6 +492,31 @@ class TestCardActionCallbackResponse:
         assert response is not None
         assert response.card is None
         mock_submit.assert_not_called()
+
+    def test_non_approval_action_can_return_configured_ack_card(
+        self, _patch_callback_card_types
+    ):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        ack_card = {
+            "header": {"title": {"tag": "plain_text", "content": "已收到"}}
+        }
+        data = _make_card_action_data(
+            {
+                "hermes_card_action": "daily_review_submit",
+                "hermes_ack_card": ack_card,
+            }
+        )
+
+        with patch(
+            "asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro
+        ):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response.card is not None
+        assert response.card.type == "raw"
+        assert response.card.data == ack_card
 
     def test_returns_card_for_approve_action(self, _patch_callback_card_types):
         adapter = _make_adapter()
@@ -445,5 +658,3 @@ class TestResolveUpdatePrompt:
 
         assert (tmp_path / ".hermes" / ".update_response").read_text() == "y"
         assert 1 not in adapter._update_prompt_state
-
-

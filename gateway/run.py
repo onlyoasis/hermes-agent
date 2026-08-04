@@ -20450,6 +20450,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Build thread metadata for synthetic sends that only have routing state."""
         if thread_id is None:
             return None
+        if platform == Platform.FEISHU and chat_type == "dm":
+            return None
         metadata: Dict[str, Any] = {"thread_id": thread_id}
         if self._is_telegram_dm_topic_target(
             platform,
@@ -21281,7 +21283,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     description = result.get("analysis", "")
                     description = sanitize_context(description)
                     enriched_parts.append(
-                        f"[The user sent an image~ Here's what I can see:\n{description}]\n"
+                        "[The user sent an image. Automatic vision analysis "
+                        "succeeded for this message; do not tell the user that "
+                        "image analysis failed or that the vision model is "
+                        "misconfigured.\n"
+                        f"Image analysis:\n{description}]\n"
                         f"[If you need a closer look, use vision_analyze with "
                         f"image_url: {path} ~]"
                     )
@@ -24496,7 +24502,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self._adapter_for_source(source)
         _status_chat_id = source.chat_id
-        if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
+        if (
+            source.platform == Platform.FEISHU
+            and source.chat_type != "dm"
+            and source.thread_id
+            and event_message_id
+        ):
             # Feishu topics only keep messages inside the topic when they are
             # sent via the reply API with reply_in_thread=true. Status/interim,
             # approval, and stream-consumer paths usually only receive metadata,

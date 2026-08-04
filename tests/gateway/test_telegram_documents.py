@@ -491,6 +491,36 @@ class TestSendDocument:
 
 class TestTelegramPhotoBatching:
     @pytest.mark.asyncio
+    async def test_audio_joins_pending_photo_burst(self, adapter):
+        photo_event = MessageEvent(
+            text="",
+            message_type=MessageType.PHOTO,
+            source=SimpleNamespace(channel_id="chat-1"),
+            media_urls=["/tmp/a.jpg"],
+            media_types=["image/jpeg"],
+        )
+        adapter._pending_photo_batches["session:media-burst"] = photo_event
+        audio_file = _make_file_obj(b"audio-bytes")
+        audio = MagicMock()
+        audio.file_size = 100
+        audio.get_file = AsyncMock(return_value=audio_file)
+        msg = _make_message()
+        msg.audio = audio
+        update = _make_update(msg)
+
+        with (
+            patch.object(adapter, "_photo_batch_key", return_value="session:media-burst"),
+            patch.object(adapter, "_enqueue_photo_event") as enqueue_mock,
+        ):
+            await adapter._handle_media_message(update, MagicMock())
+
+        enqueue_mock.assert_called_once()
+        event = enqueue_mock.call_args.args[1]
+        assert event.message_type == MessageType.AUDIO
+        assert event.media_types == ["audio/mp3"]
+        assert adapter.handle_message.call_count == 0
+
+    @pytest.mark.asyncio
     async def test_flush_photo_batch_does_not_drop_newer_scheduled_task(self, adapter):
         old_task = MagicMock()
         new_task = MagicMock()

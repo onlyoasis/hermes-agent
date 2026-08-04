@@ -36,6 +36,11 @@ def build_auth_parser(subparsers, *, cmd_auth: Callable) -> None:
     auth_add.add_argument("--client-id", help="OAuth client id")
     auth_add.add_argument("--scope", help="OAuth scope override")
     auth_add.add_argument(
+        "--region",
+        choices=["global", "cn"],
+        help="OAuth region for providers that support regional portals",
+    )
+    auth_add.add_argument(
         "--no-browser",
         action="store_true",
         help="Do not auto-open a browser for OAuth login",

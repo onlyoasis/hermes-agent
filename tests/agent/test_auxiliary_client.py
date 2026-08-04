@@ -1132,6 +1132,44 @@ class TestGetTextAuxiliaryClient:
         assert mock_openai.call_args.kwargs["api_key"] == "sk-test"
 
 
+class TestMiniMaxOAuthProviderResolution:
+    def test_resolves_minimax_oauth_for_main_agent_fallback(self):
+        token_provider = MagicMock(return_value="minimax-oauth-token")
+        real_client = MagicMock()
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_minimax_oauth_runtime_credentials",
+                return_value={
+                    "provider": "minimax-oauth",
+                    "api_key": token_provider,
+                    "base_url": "https://api.minimax.io/anthropic",
+                    "source": "oauth",
+                },
+            ) as resolve_credentials,
+            patch(
+                "agent.anthropic_adapter.build_anthropic_client",
+                return_value=real_client,
+            ) as build_client,
+        ):
+            client, model = resolve_provider_client(
+                "minimax-oauth",
+                "MiniMax-M3",
+                raw_codex=True,
+            )
+
+        assert client is not None
+        assert client.__class__.__name__ == "AnthropicAuxiliaryClient"
+        assert client.api_key is token_provider
+        assert client.base_url == "https://api.minimax.io/anthropic"
+        assert model == "MiniMax-M3"
+        resolve_credentials.assert_called_once_with(as_token_provider=True)
+        build_client.assert_called_once_with(
+            token_provider,
+            "https://api.minimax.io/anthropic",
+        )
+
+
 class TestVisionClientFallback:
     """Vision client auto mode resolves known-good multimodal backends."""
 
