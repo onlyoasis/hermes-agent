@@ -2222,13 +2222,12 @@ class FeishuAdapter(BasePlatformAdapter):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
-        return f"{session_key}:media:{event.message_type.value}"
+        return f"{session_key}:media"
 
     @staticmethod
     def _media_batch_is_compatible(existing: MessageEvent, incoming: MessageEvent) -> bool:
         return (
-            existing.message_type == incoming.message_type
-            and existing.reply_to_message_id == incoming.reply_to_message_id
+            existing.reply_to_message_id == incoming.reply_to_message_id
             and existing.reply_to_text == incoming.reply_to_text
             and existing.source.thread_id == incoming.source.thread_id
         )
@@ -2247,6 +2246,8 @@ class FeishuAdapter(BasePlatformAdapter):
             return
         existing.media_urls.extend(event.media_urls)
         existing.media_types.extend(event.media_types)
+        if event.message_type == MessageType.PHOTO:
+            existing.message_type = MessageType.PHOTO
         if event.text:
             existing.text = self._merge_caption(existing.text, event.text)
         existing.timestamp = event.timestamp
@@ -2261,10 +2262,26 @@ class FeishuAdapter(BasePlatformAdapter):
             self._flush_media_batch,
         )
 
+    def _media_batch_delay_for_event(self, event: MessageEvent | None) -> float:
+        if not event:
+            return self._media_batch_delay_seconds
+        media_types = event.media_types or []
+        has_image = any(mtype.startswith("image/") for mtype in media_types) or (
+            not media_types and event.message_type == MessageType.PHOTO
+        )
+        has_audio = any(mtype.startswith("audio/") for mtype in media_types) or (
+            not media_types and event.message_type in (MessageType.AUDIO, MessageType.VOICE)
+        )
+        if has_audio and not has_image:
+            return min(self._media_batch_delay_seconds, _DEFAULT_MEDIA_BATCH_DELAY_SECONDS)
+        if has_audio and has_image:
+            return min(self._media_batch_delay_seconds, _DEFAULT_MEDIA_BATCH_DELAY_SECONDS)
+        return self._media_batch_delay_seconds
+
     async def _flush_media_batch(self, key: str) -> None:
         current_task = asyncio.current_task()
         try:
-            await asyncio.sleep(self._media_batch_delay_seconds)
+            await asyncio.sleep(self._media_batch_delay_for_event(self._pending_media_batches.get(key)))
             await self._flush_media_batch_now(key)
         finally:
             if self._pending_media_batch_tasks.get(key) is current_task:

@@ -250,6 +250,19 @@ GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
 )
 
 
+def build_outbound_thread_metadata(source: SessionSource) -> Optional[Dict[str, str]]:
+    """Build thread routing metadata for messages sent back to ``source``.
+
+    Feishu can report a thread id for a reply inside a one-to-one chat. Sending
+    with that id sets ``reply_in_thread=True``, which hides progress, approvals,
+    clarifications, and the final answer inside the topic panel. Keep the thread
+    id on ``SessionSource`` for conversation identity, but reply in the main DM.
+    """
+    if source.platform == Platform.FEISHU and source.chat_type == "dm":
+        return None
+    return {"thread_id": source.thread_id} if source.thread_id else None
+
+
 def safe_url_for_log(url: str, max_len: int = 80) -> str:
     """Return a URL string safe for logs (no query/fragment/userinfo)."""
     if max_len <= 0:
@@ -1611,7 +1624,7 @@ class BasePlatformAdapter(ABC):
         self._active_sessions[session_key] = interrupt_event
         
         # Start continuous typing indicator (refreshes every 2 seconds)
-        _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+        _thread_metadata = build_outbound_thread_metadata(event.source)
         typing_task = asyncio.create_task(self._keep_typing(event.source.chat_id, metadata=_thread_metadata))
         
         try:
@@ -1832,7 +1845,7 @@ class BasePlatformAdapter(ABC):
             try:
                 error_type = type(e).__name__
                 error_detail = str(e)[:300] if str(e) else "no details available"
-                _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+                _thread_metadata = build_outbound_thread_metadata(event.source)
                 await self.send(
                     chat_id=event.source.chat_id,
                     content=(

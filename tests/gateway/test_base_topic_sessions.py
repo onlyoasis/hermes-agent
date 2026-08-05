@@ -6,13 +6,19 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, ProcessingOutcome, SendResult
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    ProcessingOutcome,
+    SendResult,
+    build_outbound_thread_metadata,
+)
 from gateway.session import SessionSource, build_session_key
 
 
 class DummyTelegramAdapter(BasePlatformAdapter):
-    def __init__(self):
-        super().__init__(PlatformConfig(enabled=True, token="fake-token"), Platform.TELEGRAM)
+    def __init__(self, platform=Platform.TELEGRAM):
+        super().__init__(PlatformConfig(enabled=True, token="fake-token"), platform)
         self.sent = []
         self.typing = []
         self.processing_hooks = []
@@ -62,6 +68,16 @@ def _make_event(chat_id: str, thread_id: str, message_id: str = "1") -> MessageE
 
 
 class TestBasePlatformTopicSessions:
+    def test_feishu_group_reply_keeps_topic_routing(self):
+        source = SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_topic",
+        )
+
+        assert build_outbound_thread_metadata(source) == {"thread_id": "omt_topic"}
+
     @pytest.mark.asyncio
     async def test_handle_message_does_not_interrupt_different_topic(self, monkeypatch):
         adapter = DummyTelegramAdapter()
@@ -144,6 +160,41 @@ class TestBasePlatformTopicSessions:
             ("start", "1"),
             ("complete", "1", ProcessingOutcome.SUCCESS),
         ]
+
+    @pytest.mark.asyncio
+    async def test_feishu_dm_reply_is_visible_in_main_chat(self):
+        adapter = DummyTelegramAdapter(platform=Platform.FEISHU)
+        typing_calls = []
+
+        async def handler(_event):
+            await asyncio.sleep(0)
+            return "ack"
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            typing_calls.append({"chat_id": _chat_id, "metadata": metadata})
+            await asyncio.Event().wait()
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+        source = SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_dm",
+            chat_type="dm",
+            thread_id="omt_old_topic",
+        )
+        event = MessageEvent(text="hello", source=source, message_id="om_user")
+
+        await adapter._process_message_background(event, build_session_key(source))
+
+        assert adapter.sent == [
+            {
+                "chat_id": "oc_dm",
+                "content": "ack",
+                "reply_to": "om_user",
+                "metadata": None,
+            }
+        ]
+        assert typing_calls == [{"chat_id": "oc_dm", "metadata": None}]
 
     @pytest.mark.asyncio
     async def test_process_message_background_marks_total_send_failure_unsuccessful(self):

@@ -256,6 +256,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
+    build_outbound_thread_metadata,
     merge_pending_message_event,
 )
 from gateway.restart import (
@@ -354,9 +355,11 @@ def _build_media_placeholder(event) -> str:
     media_types = getattr(event, "media_types", None) or []
     for i, url in enumerate(media_urls):
         mtype = media_types[i] if i < len(media_types) else ""
-        if mtype.startswith("image/") or getattr(event, "message_type", None) == MessageType.PHOTO:
+        if mtype.startswith("image/") or (not mtype and getattr(event, "message_type", None) == MessageType.PHOTO):
             parts.append(f"[User sent an image: {url}]")
-        elif mtype.startswith("audio/"):
+        elif mtype.startswith("audio/") or (
+            not mtype and getattr(event, "message_type", None) in (MessageType.VOICE, MessageType.AUDIO)
+        ):
             parts.append(f"[User sent audio: {url}]")
         else:
             parts.append(f"[User sent a file: {url}]")
@@ -1329,12 +1332,25 @@ class GatewayRunner:
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
-        if not self._draining:
-            return False
-
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
+            return True if self._draining else False
+
+        if not self._draining and self._busy_input_mode == "queue":
+            merge_pending_message_event(
+                adapter._pending_messages,
+                session_key,
+                event,
+                merge_text=True,
+            )
+            logger.debug(
+                "Busy session %s queued follow-up without interrupt",
+                session_key[:20],
+            )
             return True
+
+        if not self._draining:
+            return False
 
         thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
         if self._queue_during_drain_enabled():
@@ -2639,6 +2655,20 @@ class GatewayRunner:
                     if self._queue_during_drain_enabled()
                     else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
                 )
+            if self._busy_input_mode == "queue":
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    merge_pending_message_event(
+                        adapter._pending_messages,
+                        _quick_key,
+                        event,
+                        merge_text=True,
+                    )
+                    logger.debug(
+                        "PRIORITY busy follow-up for session %s queued without interrupt",
+                        _quick_key[:20],
+                    )
+                    return None
             logger.debug("PRIORITY interrupt for session %s", _quick_key[:20])
             running_agent.interrupt(event.text)
             if _quick_key in self._pending_messages:
@@ -2965,9 +2995,11 @@ class GatewayRunner:
             audio_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
-                if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
+                if mtype.startswith("image/") or (not mtype and event.message_type == MessageType.PHOTO):
                     image_paths.append(path)
-                if mtype.startswith("audio/") or event.message_type in (MessageType.VOICE, MessageType.AUDIO):
+                if mtype.startswith("audio/") or (
+                    not mtype and event.message_type in (MessageType.VOICE, MessageType.AUDIO)
+                ):
                     audio_paths.append(path)
 
             if image_paths:
@@ -5319,7 +5351,7 @@ class GatewayRunner:
             logger.warning("No adapter for platform %s in background task %s", source.platform, task_id)
             return
 
-        _thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
+        _thread_metadata = build_outbound_thread_metadata(source)
 
         try:
             user_config = _load_gateway_config()
@@ -5491,7 +5523,7 @@ class GatewayRunner:
             logger.warning("No adapter for platform %s in /btw task %s", source.platform, task_id)
             return
 
-        _thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
+        _thread_meta = build_outbound_thread_metadata(source)
 
         try:
             user_config = _load_gateway_config()
@@ -7028,7 +7060,11 @@ class GatewayRunner:
                 if result.get("success"):
                     description = result.get("analysis", "")
                     enriched_parts.append(
-                        f"[The user sent an image~ Here's what I can see:\n{description}]\n"
+                        "[The user sent an image. Automatic vision analysis "
+                        "succeeded for this message; do not tell the user that "
+                        "image analysis failed or that the vision model is "
+                        "misconfigured.\n"
+                        f"Image analysis:\n{description}]\n"
                         f"[If you need a closer look, use vision_analyze with "
                         f"image_url: {path} ~]"
                     )
@@ -7544,7 +7580,9 @@ class GatewayRunner:
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id
-        _progress_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _progress_metadata = build_outbound_thread_metadata(source)
+        if source.platform == Platform.SLACK and _progress_thread_id:
+            _progress_metadata = {"thread_id": _progress_thread_id}
 
         async def send_progress_messages():
             if not progress_queue:
@@ -7705,7 +7743,7 @@ class GatewayRunner:
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self.adapters.get(source.platform)
         _status_chat_id = source.chat_id
-        _status_thread_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _status_thread_metadata = _progress_metadata
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter:
@@ -7823,7 +7861,7 @@ class GatewayRunner:
                             adapter=_adapter,
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
-                            metadata={"thread_id": _progress_thread_id} if _progress_thread_id else None,
+                            metadata=_status_thread_metadata,
                         )
                         if _want_stream_deltas:
                             _stream_delta_cb = _stream_consumer.on_delta

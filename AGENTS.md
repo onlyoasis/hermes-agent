@@ -1,5 +1,32 @@
 # Hermes Agent - Development Guide
 
+<!-- project-knowledge-sync:start -->
+## 项目知识文档（必读）
+
+- 统一详情：`/Users/lzc/Projects/project-registry/docs/projects/hermes-agent.md`
+- 事实与状态口径：`/Users/lzc/Projects/project-registry/docs/project-documentation-standard.md`
+
+### 会话启动
+
+1. Code Agent 自动加载本文件后，在分析或修改前继续读取上面的统一详情；
+2. 先确认 `pwd`、Git root、当前分支和 `git status --short`，保留已有改动；
+3. 项目源码、测试、发布平台和真实 runtime 是当前事实；若与文档冲突，先记录差异，
+   不得用旧文档覆盖 live evidence。
+
+### 变更后的文档同步
+
+当本轮变更影响项目目标、已完成功能、架构、构建/测试结论、发布状态、安装或
+runtime 路径、域名/URL、外部准入状态、下一步计划时，必须在交接前同步更新统一
+详情中的对应章节和信息快照日期。
+
+- 代码完成、构建通过、制品生成、部署完成和线上可访问必须分开记录；
+- 发布状态只能按事实与状态口径中的枚举填写，并附当前证据；
+- 没有事实变化时，不为刷新日期而制造文档改动；
+- 不把密码、密钥、token、cookie、私人正文或数据库内容写入项目文档；
+- 更新跨仓库项目文档后，在最终交接中单独列出该改动；提交、推送、发布、启停或
+  重启仍需遵守用户授权边界。
+<!-- project-knowledge-sync:end -->
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 ## Development Environment

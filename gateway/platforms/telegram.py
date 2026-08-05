@@ -2266,17 +2266,31 @@ class TelegramAdapter(BasePlatformAdapter):
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
             return f"{session_key}:album:{media_group_id}"
-        return f"{session_key}:photo-burst"
+        return f"{session_key}:media-burst"
+
+    def _media_batch_delay_for_event(self, event: MessageEvent | None) -> float:
+        if not event:
+            return self._media_batch_delay_seconds
+        media_types = event.media_types or []
+        has_image = any(mtype.startswith("image/") for mtype in media_types) or (
+            not media_types and event.message_type == MessageType.PHOTO
+        )
+        has_audio = any(mtype.startswith("audio/") for mtype in media_types) or (
+            not media_types and event.message_type in (MessageType.AUDIO, MessageType.VOICE)
+        )
+        if has_audio:
+            return min(self._media_batch_delay_seconds, 0.8)
+        return self._media_batch_delay_seconds
 
     async def _flush_photo_batch(self, batch_key: str) -> None:
         """Send a buffered photo burst/album as a single MessageEvent."""
         current_task = asyncio.current_task()
         try:
-            await asyncio.sleep(self._media_batch_delay_seconds)
+            await asyncio.sleep(self._media_batch_delay_for_event(self._pending_photo_batches.get(batch_key)))
             event = self._pending_photo_batches.pop(batch_key, None)
             if not event:
                 return
-            logger.info("[Telegram] Flushing photo batch %s with %d image(s)", batch_key, len(event.media_urls))
+            logger.info("[Telegram] Flushing media batch %s with %d attachment(s)", batch_key, len(event.media_urls))
             await self.handle_message(event)
         finally:
             if self._pending_photo_batch_tasks.get(batch_key) is current_task:
@@ -2290,6 +2304,8 @@ class TelegramAdapter(BasePlatformAdapter):
         else:
             existing.media_urls.extend(event.media_urls)
             existing.media_types.extend(event.media_types)
+            if event.message_type == MessageType.PHOTO:
+                existing.message_type = MessageType.PHOTO
             if event.text:
                 existing.text = self._merge_caption(existing.text, event.text)
 
@@ -2463,6 +2479,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if media_group_id:
             await self._queue_media_group_event(str(media_group_id), event)
             return
+
+        if event.media_urls and event.message_type in (MessageType.AUDIO, MessageType.VOICE):
+            batch_key = self._photo_batch_key(event, msg)
+            if batch_key in self._pending_photo_batches:
+                self._enqueue_photo_event(batch_key, event)
+                return
 
         await self.handle_message(event)
     
