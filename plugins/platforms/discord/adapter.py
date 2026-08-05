@@ -23,7 +23,6 @@ import subprocess
 import tempfile
 import threading
 import time
-import traceback
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -1774,19 +1773,6 @@ class DiscordAdapter(BasePlatformAdapter):
         # Cancel the liveness probe first so it can't fire a spurious fatal
         # error / reconnect while we're intentionally tearing the adapter down.
         await self._cancel_liveness_task()
-        # Clean up all active voice connections *before* cancelling the bot task.
-        # leave_voice_channel() ends in `await vc.disconnect()`, and discord.py's
-        # VoiceClient.disconnect() sends a voice state update over the main
-        # gateway websocket and then waits for the voice socket to close.  The
-        # bot task is the loop running that gateway connection, so cancelling it
-        # first leaves the handshake with no transport: it can never complete and
-        # blocks until the caller's shutdown timeout fires.
-        for guild_id in list(self._voice_clients.keys()):
-            try:
-                await self.leave_voice_channel(guild_id)
-            except Exception as e:  # pragma: no cover - defensive logging
-                logger.debug("[%s] Error leaving voice channel %s: %s", self.name, guild_id, e)
-
         # Cancel the bot task before closing the client.  If connect() timed out
         # and returned False, the background client.start() task may still be
         # running; calling client.close() alone is not enough to stop it because
@@ -1794,6 +1780,12 @@ class DiscordAdapter(BasePlatformAdapter):
         # WebSocket handshake is in flight.  Explicitly cancelling the task here
         # ensures the zombie client cannot receive or dispatch any further events.
         await self._cancel_bot_task()
+        # Clean up all active voice connections before closing the client
+        for guild_id in list(self._voice_clients.keys()):
+            try:
+                await self.leave_voice_channel(guild_id)
+            except Exception as e:  # pragma: no cover - defensive logging
+                logger.debug("[%s] Error leaving voice channel %s: %s", self.name, guild_id, e)
 
         if self._client:
             try:
@@ -3041,29 +3033,6 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         if not self._client:
             return SendResult(success=False, error="Not connected")
-        if not (content or "").strip():
-            logger.warning(
-                "[%s] Dropped empty message to chat=%s (caller bug). Call site:\n%s",
-                self.name,
-                chat_id,
-                "".join(traceback.format_stack(limit=12)[:-1]),
-            )
-            result = SendResult(
-                success=False,
-                error="Refusing to send empty message",
-            )
-            # Mirror the exception path's recovery bookkeeping. Missed-message
-            # backfill decides what to replay from this table, so a dropped
-            # final reply must be recorded as failed — otherwise the reply is
-            # both never sent and never retried.
-            await asyncio.to_thread(
-                self._record_discord_response,
-                reply_to=reply_to,
-                result=result,
-                content=content,
-                final=bool(metadata and metadata.get("notify")),
-            )
-            return result
 
         try:
             # Determine target channel: thread_id in metadata takes precedence.

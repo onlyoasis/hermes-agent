@@ -286,9 +286,7 @@ export function SidebarSessionsSection({
     (items: SessionInfo[]) => {
       const entries = flattenSessionsWithBranches(items)
 
-      return (dateGrouped ? groupEntriesByRecency(entries) : toSessionRows(entries)).map(row =>
-        renderListRow(row, false)
-      )
+      return (dateGrouped ? groupEntriesByRecency(entries) : toSessionRows(entries)).map(row => renderListRow(row, false))
     },
     [dateGrouped, renderListRow]
   )

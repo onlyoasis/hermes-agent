@@ -88,7 +88,6 @@ describe('pet info metadata cache helpers', () => {
       spritesheetBase64: 'large-sprite-payload',
       spritesheetRevision: '100:2048'
     }
-
     const meta = {
       enabled: true,
       slug: 'boba',
@@ -117,7 +116,6 @@ describe('pet info metadata cache helpers', () => {
       spritesheetBase64: 'large-sprite-payload',
       spritesheetRevision: '100:2048'
     }
-
     const meta = {
       enabled: true,
       slug: 'boba',

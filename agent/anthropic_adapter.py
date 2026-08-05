@@ -1360,27 +1360,19 @@ def resolve_anthropic_token() -> Optional[str]:
     Priority:
       1. ANTHROPIC_TOKEN env var (OAuth/setup token saved by Hermes)
       2. CLAUDE_CODE_OAUTH_TOKEN env var
-      3. ANTHROPIC_API_KEY env var (explicit regular API key)
-      4. Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json)
+      3. Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json)
          — with automatic refresh if expired and a refresh token is available
-      5. Anthropic credential_pool OAuth entry (~/.hermes/auth.json)
+      4. Anthropic credential_pool OAuth entry (~/.hermes/auth.json)
+      5. ANTHROPIC_API_KEY env var (regular API key, or legacy fallback)
 
     Returns the token string or None.
     """
-    creds: Optional[Dict[str, Any]] = None
-    creds_loaded = False
-
-    def _read_creds() -> Optional[Dict[str, Any]]:
-        nonlocal creds, creds_loaded
-        if not creds_loaded:
-            creds = read_claude_code_credentials()
-            creds_loaded = True
-        return creds
+    creds = read_claude_code_credentials()
 
     # 1. Hermes-managed OAuth/setup token env var
     token = _getenv("ANTHROPIC_TOKEN").strip()
     if token:
-        preferred = _prefer_refreshable_claude_code_token(token, _read_creds())
+        preferred = _prefer_refreshable_claude_code_token(token, creds)
         if preferred:
             return preferred
         return token
@@ -1388,26 +1380,26 @@ def resolve_anthropic_token() -> Optional[str]:
     # 2. CLAUDE_CODE_OAUTH_TOKEN (used by Claude Code for setup-tokens)
     cc_token = _getenv("CLAUDE_CODE_OAUTH_TOKEN").strip()
     if cc_token:
-        preferred = _prefer_refreshable_claude_code_token(cc_token, _read_creds())
+        preferred = _prefer_refreshable_claude_code_token(cc_token, creds)
         if preferred:
             return preferred
         return cc_token
 
-    # 3. Regular API key. An explicit user-configured key must not be shadowed
-    # by auto-discovered Claude Code or credential-pool OAuth credentials.
-    api_key = _getenv("ANTHROPIC_API_KEY").strip()
-    if api_key:
-        return api_key
-
-    # 4. Claude Code credential file
-    resolved_claude_token = _resolve_claude_code_token_from_credentials(_read_creds())
+    # 3. Claude Code credential file
+    resolved_claude_token = _resolve_claude_code_token_from_credentials(creds)
     if resolved_claude_token:
         return resolved_claude_token
 
-    # 5. Hermes credential_pool OAuth entry.
+    # 4. Hermes credential_pool OAuth entry.
     resolved_pool_token = _resolve_anthropic_pool_token()
     if resolved_pool_token:
         return resolved_pool_token
+
+    # 5. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
+    # This remains as a compatibility fallback for pre-migration Hermes configs.
+    api_key = _getenv("ANTHROPIC_API_KEY").strip()
+    if api_key:
+        return api_key
 
     return None
 

@@ -200,8 +200,6 @@ export type {
   HermesPlugin,
   PluginContext,
   PluginContribution,
-  PluginNativeNotificationInput,
-  PluginOs,
   PluginRestOptions,
   PluginStorage
 } from '@/contrib/plugin'

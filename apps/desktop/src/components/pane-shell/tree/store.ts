@@ -28,10 +28,9 @@ import {
   mergeZonesWithPane as mergeZonesWithPaneOp,
   mirrorTreeHorizontal,
   movePane as movePaneOp,
-  movePanes as movePanesOp,
   normalize,
   removePane,
-  reorderPanesInGroup as reorderPanesInGroupOp,
+  reorderPaneInGroup as reorderPaneInGroupOp,
   setActivePane as setActivePaneOp,
   setGroupHeaderHidden as setGroupHeaderHiddenOp,
   setGroupMinimized,
@@ -550,29 +549,26 @@ function shownPanesInGroup(group: { panes: readonly string[] }): string[] {
 /** ⌘1…⌘9: activate the Nth *visible* tab of the target zone — the first of
  *  hovered / focused / workspace that is a real tab strip (≥2 shown panes).
  *  Pointing at the sidebar (or nothing) therefore still switches main's tabs
- *  instead of dead-ending. Returns the activated pane id — the caller needs to
- *  know when the slot landed on the workspace tab (a full page covering it
- *  must also route back to the chat) — or null so it falls back to its
+ *  instead of dead-ending. Returns false so the caller falls back to its
  *  default (profile switch) when no zone qualifies. */
-export function activateTreeTabSlot(slot: number): null | string {
+export function activateTreeTabSlot(slot: number): boolean {
   const group = tabTargetGroup(candidate => shownPanesInGroup(candidate).length >= 2)
   const panes = group ? shownPanesInGroup(group) : []
 
   if (!group || slot < 1 || slot > panes.length) {
-    return null
+    return false
   }
 
   activateTreePane(group.id, panes[slot - 1])
 
-  return panes[slot - 1]
+  return true
 }
 
 /** ⌃Tab / ⌃⇧Tab: cycle the target zone's *visible* tabs (wrapping) — the first
  *  of hovered / focused / workspace that is a chat strip with ≥2 shown tabs.
- *  Returns the activated pane id (see `activateTreeTabSlot` — landing on the
- *  workspace under a full page must route back to the chat), or null so the
- *  caller falls back to the recent-session switcher when no zone qualifies. */
-export function cycleTreeTabInFocusedZone(direction: 1 | -1): null | string {
+ *  Returns false so the caller falls back to the recent-session switcher when
+ *  no zone qualifies. */
+export function cycleTreeTabInFocusedZone(direction: 1 | -1): boolean {
   const group = tabTargetGroup(candidate => {
     const shown = shownPanesInGroup(candidate)
 
@@ -580,7 +576,7 @@ export function cycleTreeTabInFocusedZone(direction: 1 | -1): null | string {
   })
 
   if (!group) {
-    return null
+    return false
   }
 
   const panes = shownPanesInGroup(group)
@@ -599,7 +595,7 @@ export function cycleTreeTabInFocusedZone(direction: 1 | -1): null | string {
     setTreeGroupHeaderHidden(group.id, false)
   }
 
-  return nextId
+  return true
 }
 
 /** Remove a pane from the tree WITHOUT a dismissal record — for surfaces
@@ -1248,61 +1244,25 @@ export function applyTree(tree: LayoutNode, presetId: string) {
 }
 
 /**
- * Move a multi-tab SELECTION in one commit (drag any selected tab): the lead
- * pane takes the drop geometry, the rest stack in behind it in strip order,
- * and `activeId` (the pressed tab) fronts in the landing group.
- */
-export function moveTreePanes(
-  paneIds: readonly string[],
-  target: { groupId: string; pos: DropPosition; before?: null | string },
-  activeId?: string
-) {
-  const tree = $layoutTree.get()
-
-  if (!tree) {
-    return
-  }
-
-  const next = movePanesOp(tree, paneIds, target, activeId)
-
-  if (next !== tree) {
-    commit(next)
-    markActivePreset('custom')
-
-    for (const paneId of paneIds) {
-      markPaneUserPlaced(paneId)
-    }
-  }
-}
-
-/**
  * Shift-drag span: merge the highlighted zones into one holding `paneId`. Falls
  * back to a single-zone move at `fallbackGroupId` when the set can't merge
  * (non-rectangular selection).
  */
-export function mergeTreeZones(
-  groupIds: string[],
-  paneId: string | readonly string[],
-  fallbackGroupId: null | string
-) {
+export function mergeTreeZones(groupIds: string[], paneId: string, fallbackGroupId: string | null) {
   const tree = $layoutTree.get()
 
   if (!tree) {
     return
   }
 
-  const paneIds = typeof paneId === 'string' ? [paneId] : paneId
   const merged = mergeZonesWithPaneOp(tree, groupIds, paneId)
 
   if (merged) {
     commit(merged)
     markActivePreset('custom')
-
-    for (const id of paneIds) {
-      markPaneUserPlaced(id)
-    }
+    markPaneUserPlaced(paneId)
   } else if (fallbackGroupId) {
-    moveTreePanes(paneIds, { groupId: fallbackGroupId, pos: 'center' })
+    moveTreePane(paneId, { groupId: fallbackGroupId, pos: 'center' })
   }
 }
 
@@ -1314,13 +1274,11 @@ export function activateTreePane(groupId: string, paneId: string) {
   }
 }
 
-/** Reorder a tab block (multi-tab selection, or a single tab) within its
- *  group's strip — the block keeps its own order. */
-export function reorderTreePanes(groupId: string, paneIds: readonly string[], toIndex: number) {
+export function reorderTreePane(groupId: string, paneId: string, toIndex: number) {
   const tree = $layoutTree.get()
 
   if (tree) {
-    commit(reorderPanesInGroupOp(tree, groupId, paneIds, toIndex))
+    commit(reorderPaneInGroupOp(tree, groupId, paneId, toIndex))
     markActivePreset('custom')
   }
 }

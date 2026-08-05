@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest'
 
-import { messageRenderWeight, RENDER_WEIGHT_CHARS } from '@/lib/render-weight'
-
 import {
   buildGroups,
   firstVisibleGroupIndex,
@@ -9,6 +7,8 @@ import {
   LIVE_TAIL_PARTS,
   liveTailStart,
   type MessageGroup,
+  messageRenderWeight,
+  RENDER_WEIGHT_CHARS,
   resolveThreadScrollTarget
 } from './list'
 

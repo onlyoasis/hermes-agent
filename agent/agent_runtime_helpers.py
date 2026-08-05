@@ -1020,13 +1020,6 @@ def recover_with_credential_pool(
         }
         if _credential_id:
             kwargs["credential_id"] = _credential_id
-        # Hand the pool the classified semantics, not just the status. A
-        # billing 403 (OpenRouter "key limit exceeded", xAI spending limit)
-        # and an edge-throttle 403 are the same number but need opposite
-        # cooldowns — the pool can only tell them apart if we say which.
-        # ``effective_reason`` is resolved below; this closure runs after.
-        if effective_reason is not None:
-            kwargs["failure_reason"] = effective_reason.value
         return pool.mark_exhausted_and_rotate(**kwargs)
 
     effective_reason = classified_reason
@@ -1709,7 +1702,6 @@ def restore_primary_runtime(agent) -> bool:
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
         agent._fallback_index = 0
-        agent._rate_limit_backoff_count = 0  # reset exponential backoff counter
 
         # Reset the stale-call circuit breaker (#58962): the streak measured
         # the FALLBACK provider we're leaving; the restored primary deserves

@@ -9,14 +9,7 @@ from typing import Any
 from agent.relay_runtime import RUNTIME_INSTANCE_KEY
 
 from .shared_metrics import SharedMetricsStore
-from .shared_metrics_contract import (
-    MODEL_ROUTE_METRIC,
-    TOOL_CALL_METRIC,
-    model_call_dimensions,
-    task_counter,
-    tool_approval_counter,
-    tool_call_dimensions,
-)
+from .shared_metrics_contract import MODEL_CALL_METRIC, model_call_dimensions, task_counter
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +44,12 @@ class SharedMetricsSubscriber:
             ):
                 return
         dimensions = model_call_dimensions(event)
-        metric_name = MODEL_ROUTE_METRIC
+        metric_name = MODEL_CALL_METRIC
         if dimensions is None:
-            dimensions = tool_call_dimensions(event)
-            metric_name = TOOL_CALL_METRIC
-        if dimensions is None:
-            metric = task_counter(event) or tool_approval_counter(event)
-            if metric is None:
+            task_metric = task_counter(event)
+            if task_metric is None:
                 return
-            metric_name, dimensions = metric
+            metric_name, dimensions = task_metric
         with self._lock:
             if not self._active:
                 return

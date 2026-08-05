@@ -162,12 +162,10 @@ function TileChat({
     (url: string) => addContextRefAttachment(`@url:${formatRefValue(url)}`, url),
     [addContextRefAttachment]
   )
-
   const onPasteClipboardImage = useCallback(
     (opts?: { silent?: boolean }) => pasteClipboardImage(opts),
     [pasteClipboardImage]
   )
-
   const onPickFiles = useCallback(() => void pickContextPaths('file'), [pickContextPaths])
   const onPickFolders = useCallback(() => void pickContextPaths('folder'), [pickContextPaths])
   const onPickImages = useCallback(() => void pickImages(), [pickImages])

@@ -172,7 +172,6 @@ export function FloatingPet() {
 
             if (hasPetSpriteForMeta(current, meta)) {
               const merged = mergePetInfoMeta(current, meta)
-
               if (merged !== current) {
                 setPetInfo(merged)
               }
@@ -215,14 +214,11 @@ export function FloatingPet() {
     // so no timer. Legacy backend: the historical poll.
     const timer = changeEventsAvailable
       ? null
-      : window.setInterval(
-          () => {
-            if (document.visibilityState === 'visible') {
-              void pull()
-            }
-          },
-          active ? PET_ACTIVE_REFRESH_MS : PET_POLL_MS
-        )
+      : window.setInterval(() => {
+          if (document.visibilityState === 'visible') {
+            void pull()
+          }
+        }, active ? PET_ACTIVE_REFRESH_MS : PET_POLL_MS)
 
     return () => {
       cancelled = true

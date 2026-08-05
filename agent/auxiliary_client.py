@@ -2851,7 +2851,6 @@ def _relay_auxiliary_call(callback):
             "attempt_count": 0,
             "provider": "",
             "model": "",
-            "response_model": None,
             "api_mode": "chat_completions",
         })
         try:
@@ -2877,7 +2876,6 @@ def _relay_auxiliary_call_async(callback):
             "attempt_count": 0,
             "provider": "",
             "model": "",
-            "response_model": None,
             "api_mode": "chat_completions",
         })
         try:
@@ -2901,7 +2899,6 @@ def _set_relay_auxiliary_route(
         return
     context["provider"] = str(provider or "auxiliary")
     context["model"] = str(model or "unknown")
-    context["response_model"] = None
     context["api_mode"] = str(api_mode or "chat_completions")
 
 
@@ -7645,77 +7642,6 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Per-task concurrency limiting (#23324)
-# ---------------------------------------------------------------------------
-# Background auxiliary work (title generation, context compression, etc.) can
-# spawn unbounded concurrent LLM calls when many sessions are active. During
-# provider incidents each call also retries / fans out across the fallback
-# chain, multiplying request volume on already-degraded endpoints. A per-task
-# semaphore caps in-flight calls so retry amplification stays bounded.
-
-_aux_sync_semaphores: Dict[str, Tuple[int, threading.BoundedSemaphore]] = {}
-_aux_async_semaphores: Dict[Tuple[str, int], Tuple[int, Any]] = {}
-_aux_sem_lock = threading.Lock()
-
-
-def _get_task_max_concurrency(task: Optional[str]) -> Optional[int]:
-    """Return ``auxiliary.<task>.max_concurrency`` as a positive int, or None."""
-    if not task or task == "vision":
-        # Vision already uses this key for its encode/resize CPU worker pool;
-        # its LLM calls deliberately remain concurrent.
-        return None
-    raw = _get_auxiliary_task_config(task).get("max_concurrency")
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
-
-
-def _acquire_sync_aux_semaphore(task: Optional[str]) -> Optional[threading.BoundedSemaphore]:
-    """Get a per-task sync semaphore, rebuilding it after a config change."""
-    limit = _get_task_max_concurrency(task)
-    if limit is None:
-        return None
-    with _aux_sem_lock:
-        entry = _aux_sync_semaphores.get(task)
-        if entry is None or entry[0] != limit:
-            semaphore = threading.BoundedSemaphore(limit)
-            _aux_sync_semaphores[task] = (limit, semaphore)
-            return semaphore
-        return entry[1]
-
-
-def _acquire_async_aux_semaphore(task: Optional[str]):
-    """Get a per-task, per-event-loop async semaphore after config lookup."""
-    limit = _get_task_max_concurrency(task)
-    if limit is None:
-        return None
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return None
-    key = (task, id(loop))
-    with _aux_sem_lock:
-        entry = _aux_async_semaphores.get(key)
-        if entry is None or entry[0] != limit:
-            semaphore = asyncio.Semaphore(limit)
-            _aux_async_semaphores[key] = (limit, semaphore)
-            return semaphore
-        return entry[1]
-
-
-def _reset_aux_semaphores() -> None:
-    """Drop cached semaphores (test helper)."""
-    with _aux_sem_lock:
-        _aux_sync_semaphores.clear()
-        _aux_async_semaphores.clear()
-
-
-# ---------------------------------------------------------------------------
 # Anthropic-compatible endpoint detection + image block conversion
 # ---------------------------------------------------------------------------
 
@@ -8113,7 +8039,6 @@ def _validate_llm_response(
     except (AttributeError, TypeError, IndexError) as exc:
         recovered = _recover_aux_response_message(response)
         if recovered is not None:
-            _record_relay_auxiliary_response_model(response)
             _complete_relay_auxiliary_call()
             return recovered
         response_type = type(response).__name__
@@ -8124,7 +8049,6 @@ def _validate_llm_response(
             f"Expected object with .choices[0].message — check provider "
             f"adapter or custom endpoint compatibility."
         ) from exc
-    _record_relay_auxiliary_response_model(response)
     _complete_relay_auxiliary_call()
     return response
 
@@ -8139,23 +8063,7 @@ def _complete_relay_auxiliary_call(*, outcome: str = "success") -> None:
     relay_llm.complete_logical_call(
         str(context.get("request_id") or ""),
         outcome=outcome,
-        model_name=str(context.get("model") or "unknown"),
-        provider_name=str(context.get("provider") or "auxiliary"),
-        response_model_name=context.get("response_model"),
     )
-
-
-def _record_relay_auxiliary_response_model(response: Any) -> None:
-    """Retain the provider-reported model for terminal route attribution."""
-    context = _RELAY_AUX_CALL_CONTEXT.get()
-    if context is None:
-        return
-    if isinstance(response, dict):
-        model = response.get("model")
-    else:
-        model = getattr(response, "model", None)
-    if isinstance(model, str) and model.strip():
-        context["response_model"] = model
 
 
 def _fail_relay_auxiliary_call() -> None:
@@ -8569,75 +8477,6 @@ async def _acreate_with_stream(
 
 @_relay_auxiliary_call
 def call_llm(
-    task: str = None,
-    *,
-    provider: str = None,
-    model: str = None,
-    base_url: str = None,
-    api_key: str = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    messages: list,
-    temperature: Optional[float] = None,
-    max_tokens: int = None,
-    tools: list = None,
-    timeout: float = None,
-    extra_body: dict = None,
-    reasoning_config: Optional[dict] = None,
-    extra_headers: Optional[Dict[str, str]] = None,
-    api_mode: str = None,
-    stream: bool = False,
-    stream_options: dict = None,
-) -> Any:
-    """Run an auxiliary LLM request, applying the configured task limit."""
-    semaphore = _acquire_sync_aux_semaphore(task)
-    if semaphore is not None:
-        semaphore.acquire()
-    try:
-        response = _call_llm_impl(
-            task=task,
-            provider=provider,
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            main_runtime=main_runtime,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            timeout=timeout,
-            extra_body=extra_body,
-            reasoning_config=reasoning_config,
-            extra_headers=extra_headers,
-            api_mode=api_mode,
-            stream=stream,
-            stream_options=stream_options,
-        )
-        if stream and semaphore is not None:
-            stream_semaphore = semaphore
-            semaphore = None
-            return _release_sync_semaphore_after_stream(response, stream_semaphore)
-        return response
-    finally:
-        if semaphore is not None:
-            semaphore.release()
-
-
-def _release_sync_semaphore_after_stream(
-    stream: Any, semaphore: threading.BoundedSemaphore,
-):
-    """Release a permit only after a streaming response is consumed or closed."""
-    try:
-        yield from stream
-    finally:
-        try:
-            close = getattr(stream, "close", None)
-            if callable(close):
-                close()
-        finally:
-            semaphore.release()
-
-
-def _call_llm_impl(
     task: str = None,
     *,
     provider: str = None,
@@ -9405,47 +9244,6 @@ def extract_content_or_reasoning(response) -> str:
 
 @_relay_auxiliary_call_async
 async def async_call_llm(
-    task: str = None,
-    *,
-    provider: str = None,
-    model: str = None,
-    base_url: str = None,
-    api_key: str = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    messages: list,
-    temperature: Optional[float] = None,
-    max_tokens: int = None,
-    tools: list = None,
-    timeout: float = None,
-    extra_body: dict = None,
-    reasoning_config: Optional[dict] = None,
-) -> Any:
-    """Run an asynchronous auxiliary LLM request under the configured limit."""
-    semaphore = _acquire_async_aux_semaphore(task)
-    if semaphore is not None:
-        await semaphore.acquire()
-    try:
-        return await _async_call_llm_impl(
-            task=task,
-            provider=provider,
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            main_runtime=main_runtime,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            timeout=timeout,
-            extra_body=extra_body,
-            reasoning_config=reasoning_config,
-        )
-    finally:
-        if semaphore is not None:
-            semaphore.release()
-
-
-async def _async_call_llm_impl(
     task: str = None,
     *,
     provider: str = None,

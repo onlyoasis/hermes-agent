@@ -376,14 +376,6 @@ class ManagedLlmStream(Iterator[Any]):
         self._callback_error: BaseException | None = None
         self._logical: tuple[relay_runtime.RelayTurnContext, Any, str] | None = None
         self._defer_logical_completion = defer_logical_completion
-        if str((metadata or {}).get("call_role") or "").startswith("auxiliary:"):
-            self._logical_model_name: str | None = model_name
-            self._logical_provider_name: str | None = name
-            self._logical_response_model_name: str | None = None
-        else:
-            self._logical_model_name = None
-            self._logical_provider_name = None
-            self._logical_response_model_name = None
         self._on_chunk = on_chunk
         self._chunk_adapter = chunk_adapter or _namespace
         self._accept_chunk = accept_chunk
@@ -493,12 +485,8 @@ class ManagedLlmStream(Iterator[Any]):
                 return None
             try:
                 if self.final_response is not None:
-                    response = self.final_response
-                else:
-                    response = run_callback(finalizer)
-                if self._logical_model_name is not None:
-                    self._logical_response_model_name = _response_model_name(response)
-                return _jsonable(response)
+                    return _jsonable(self.final_response)
+                return _jsonable(run_callback(finalizer))
             except BaseException as exc:
                 self._callback_error = exc
                 raise
@@ -540,9 +528,6 @@ class ManagedLlmStream(Iterator[Any]):
                 _complete_logical(
                     self._logical,
                     outcome="cancelled" if _is_cancellation(exc) else "failed",
-                    model_name=self._logical_model_name,
-                    provider_name=self._logical_provider_name,
-                    response_model_name=self._logical_response_model_name,
                 )
                 self._logical = None
             loop.close()
@@ -575,13 +560,7 @@ class ManagedLlmStream(Iterator[Any]):
             if self._raw_chunks:
                 self.output_modified = True
             if not self._defer_logical_completion:
-                _complete_logical(
-                    self._logical,
-                    outcome="success",
-                    model_name=self._logical_model_name,
-                    provider_name=self._logical_provider_name,
-                    response_model_name=self._logical_response_model_name,
-                )
+                _complete_logical(self._logical, outcome="success")
                 self._logical = None
             self._close(logical_outcome="cancelled")
             raise StopIteration from None
@@ -654,13 +633,7 @@ class ManagedLlmStream(Iterator[Any]):
                     )
             loop.close()
         if not self._defer_logical_completion:
-            _complete_logical(
-                self._logical,
-                outcome="success",
-                model_name=self._logical_model_name,
-                provider_name=self._logical_provider_name,
-                response_model_name=self._logical_response_model_name,
-            )
+            _complete_logical(self._logical, outcome="success")
             self._logical = None
 
     def _close(self, *, logical_outcome: str) -> None:
@@ -690,13 +663,7 @@ class ManagedLlmStream(Iterator[Any]):
                             exc_info=True,
                         )
             if not self._defer_logical_completion:
-                _complete_logical(
-                    self._logical,
-                    outcome=logical_outcome,
-                    model_name=self._logical_model_name,
-                    provider_name=self._logical_provider_name,
-                    response_model_name=self._logical_response_model_name,
-                )
+                _complete_logical(self._logical, outcome=logical_outcome)
                 self._logical = None
             return
         close = getattr(self._stream, "aclose", None)
@@ -711,13 +678,7 @@ class ManagedLlmStream(Iterator[Any]):
                 if self._close_error is None:
                     self._close_error = exc
         if not self._defer_logical_completion:
-            _complete_logical(
-                self._logical,
-                outcome=logical_outcome,
-                model_name=self._logical_model_name,
-                provider_name=self._logical_provider_name,
-                response_model_name=self._logical_response_model_name,
-            )
+            _complete_logical(self._logical, outcome=logical_outcome)
             self._logical = None
         loop.close()
 
@@ -856,9 +817,6 @@ def _complete_logical(
     logical: tuple[relay_runtime.RelayTurnContext, Any, str] | None,
     *,
     outcome: str,
-    model_name: str | None = None,
-    provider_name: str | None = None,
-    response_model_name: str | None = None,
 ) -> None:
     if logical is None:
         return
@@ -873,16 +831,11 @@ def _complete_logical(
         if lease.session is None:
             return
         try:
-            output = {"outcome": outcome}
-            if model_name is not None and provider_name is not None:
-                output.update({"model": model_name, "provider": provider_name})
-                if response_model_name is not None:
-                    output["response_model"] = response_model_name
             lease.host.run_in_session(
                 lease.session,
                 lease.host.relay.scope.pop,
                 handle,
-                output=output,
+                output={"outcome": outcome},
                 metadata={
                     relay_runtime.RUNTIME_SCHEMA_KEY: relay_runtime.RUNTIME_SCHEMA_VERSION,
                     relay_runtime.RUNTIME_INSTANCE_KEY: lease.host.runtime_id,
@@ -932,14 +885,7 @@ def _is_cancellation(error: BaseException) -> bool:
     )
 
 
-def complete_logical_call(
-    api_request_id: str,
-    *,
-    outcome: str,
-    model_name: str | None = None,
-    provider_name: str | None = None,
-    response_model_name: str | None = None,
-) -> None:
+def complete_logical_call(api_request_id: str, *, outcome: str) -> None:
     """Complete the active turn's logical LLM call after caller validation."""
     turn = relay_runtime.active_turn()
     if turn is None or not api_request_id:
@@ -947,22 +893,7 @@ def complete_logical_call(
     with turn.logical_llm_lock:
         handle = turn.logical_llm_calls.get(api_request_id)
     if handle is not None:
-        _complete_logical(
-            (turn, handle, api_request_id),
-            outcome=outcome,
-            model_name=model_name,
-            provider_name=provider_name,
-            response_model_name=response_model_name,
-        )
-
-
-def _response_model_name(response: Any) -> str | None:
-    """Return a provider-reported model name when one is available."""
-    if isinstance(response, dict):
-        value = response.get("model")
-    else:
-        value = getattr(response, "model", None)
-    return value if isinstance(value, str) and value.strip() else None
+        _complete_logical((turn, handle, api_request_id), outcome=outcome)
 
 
 def _provider_request(
