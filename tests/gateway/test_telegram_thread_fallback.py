@@ -562,6 +562,16 @@ async def test_send_image_upload_dm_topic_reply_not_found_retry_drops_thread_id(
     assert "direct_messages_topic_id" not in call_log[2]
 
 
+def test_base_gateway_metadata_does_not_hide_feishu_dm_reply_in_topic():
+    source = SimpleNamespace(
+        platform=Platform.FEISHU,
+        chat_type="dm",
+        thread_id="omt_old_topic",
+    )
+
+    assert _thread_metadata_for_source(source, "om_user") is None
+
+
 @pytest.mark.asyncio
 async def test_send_image_upload_fallback_blocks_connect_time_rebind(monkeypatch):
     import httpcore
@@ -722,5 +732,4 @@ async def test_thread_fallback_only_fires_once():
     # Second chunk: should use thread_id=None directly (effective_thread_id
     # was cleared per-chunk but the metadata doesn't change between chunks)
     # The key point: the message was delivered despite the invalid thread
-
 

@@ -769,3 +769,56 @@ def test_auth_remove_copilot_suppresses_all_variants(tmp_path, monkeypatch):
     assert is_source_suppressed("copilot", "env:GITHUB_TOKEN")
 
 
+def test_auth_add_minimax_oauth_passes_cn_region(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}})
+    captured: dict[str, object] = {}
+
+    def _login(*, region, open_browser, timeout_seconds):
+        captured.update(
+            region=region,
+            open_browser=open_browser,
+            timeout_seconds=timeout_seconds,
+        )
+        return {
+            "access_token": "minimax-access",
+            "refresh_token": "minimax-refresh",
+            "inference_base_url": "https://api.minimaxi.com/anthropic",
+            "expires_at": "2026-07-20T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr("hermes_cli.auth._minimax_oauth_login", _login)
+
+    from hermes_cli.auth_commands import auth_add_command
+
+    class _Args:
+        provider = "minimax-oauth"
+        auth_type = "oauth"
+        api_key = None
+        label = "china-plan"
+        region = "cn"
+        no_browser = True
+        timeout = 30.0
+
+    auth_add_command(_Args())
+
+    assert captured == {
+        "region": "cn",
+        "open_browser": False,
+        "timeout_seconds": 30.0,
+    }
+
+
+def test_auth_add_parser_accepts_minimax_region() -> None:
+    import argparse
+
+    from hermes_cli.subcommands.auth import build_auth_parser
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    build_auth_parser(subparsers, cmd_auth=lambda _args: None)
+
+    args = parser.parse_args(["auth", "add", "minimax-oauth", "--region", "cn"])
+
+    assert args.region == "cn"
+

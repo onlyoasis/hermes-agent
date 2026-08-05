@@ -1183,6 +1183,21 @@ def _extract_responses_reasoning_text(item: Any) -> str:
     return ""
 
 
+def _safe_responses_output_text(response: Any) -> str:
+    """Read ``response.output_text`` without exposing the SDK NoneType bug."""
+    try:
+        output_text = getattr(response, "output_text", None)
+    except TypeError as exc:
+        if "NoneType" in str(exc) and "iterable" in str(exc):
+            logger.debug(
+                "Responses output_text property hit SDK NoneType iterable bug; "
+                "ignoring property fallback."
+            )
+            return ""
+        raise
+    return output_text.strip() if isinstance(output_text, str) else ""
+
+
 def _format_responses_error(error_obj: Any, response_status: str) -> str:
     """Build a human-readable error string from a Responses ``response.error`` payload.
 
@@ -1262,15 +1277,15 @@ def _normalize_codex_response(
         # The Codex backend can return empty output when the answer was
         # delivered entirely via stream events. Check output_text as a
         # last-resort fallback before raising.
-        out_text = getattr(response, "output_text", None)
-        if isinstance(out_text, str) and out_text.strip():
+        out_text = _safe_responses_output_text(response)
+        if out_text:
             logger.debug(
                 "Codex response has empty output but output_text is present (%d chars); "
-                "synthesizing output item.", len(out_text.strip()),
+                "synthesizing output item.", len(out_text),
             )
             output = [SimpleNamespace(
                 type="message", role="assistant", status="completed",
-                content=[SimpleNamespace(type="output_text", text=out_text.strip())],
+                content=[SimpleNamespace(type="output_text", text=out_text)],
             )]
             response.output = output
         elif response_incomplete_content_filter:
@@ -1464,12 +1479,9 @@ def _normalize_codex_response(
     final_text = "\n".join([p for p in content_parts if p]).strip()
     if (
         not final_text
-        and hasattr(response, "output_text")
         and not (saw_commentary_phase and not saw_final_answer_phase)
     ):
-        out_text = getattr(response, "output_text", "")
-        if isinstance(out_text, str):
-            final_text = out_text.strip()
+        final_text = _safe_responses_output_text(response)
 
     # ── Tool-call leak recovery ──────────────────────────────────
     # gpt-5.x on the Codex Responses API sometimes degenerates and emits

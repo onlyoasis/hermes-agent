@@ -58,6 +58,7 @@ import logging
 import mimetypes
 import os
 import re
+import sys
 import threading
 import time
 import uuid
@@ -254,6 +255,11 @@ _APPROVAL_LABEL_MAP: Dict[str, str] = {
     "session": "Approved for session",
     "always": "Approved permanently",
     "deny": "Denied",
+}
+_SLASH_CONFIRM_LABEL_MAP: Dict[str, str] = {
+    "once": "Approved once",
+    "always": "Always approved",
+    "cancel": "Cancelled",
 }
 
 
@@ -1533,6 +1539,9 @@ class FeishuAdapter(BasePlatformAdapter):
         # Exec approval button state (approval_id → {session_key, message_id, chat_id})
         self._approval_state: Dict[int, Dict[str, str]] = {}
         self._approval_counter = itertools.count(1)
+        # Slash-command confirmation state
+        # (confirm_id → {session_key, chat_id, chat_type}).
+        self._slash_confirm_state: Dict[str, Dict[str, str]] = {}
         # Update prompt button state (prompt_id → {session_key, message_id, chat_id})
         self._update_prompt_state: Dict[int, Dict[str, str]] = {}
         self._update_prompt_counter = itertools.count(1)
@@ -2053,6 +2062,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
         try:
             approval_id = next(self._approval_counter)
+            chat_info = await self.get_chat_info(chat_id)
 
             def _btn(label: str, action_name: str, btn_type: str = "default") -> dict:
                 return {
@@ -2101,11 +2111,100 @@ class FeishuAdapter(BasePlatformAdapter):
                     "session_key": session_key,
                     "message_id": result.message_id or "",
                     "chat_id": chat_id,
+                    "chat_type": self._approval_chat_type(
+                        session_key=session_key,
+                        chat_info=chat_info,
+                    ),
                 }
             return result
         except Exception as exc:
             logger.warning("[Feishu] send_exec_approval failed: %s", exc)
             return SendResult(success=False, error=str(exc))
+
+    async def send_slash_confirm(
+        self,
+        chat_id: str,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an interactive card for a gated slash command."""
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            chat_info = await self.get_chat_info(chat_id)
+
+            def _button(
+                label: str, choice: str, button_type: str = "default"
+            ) -> dict:
+                return {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": label},
+                    "type": button_type,
+                    "value": {
+                        "hermes_slash_confirm_action": choice,
+                        "confirm_id": confirm_id,
+                    },
+                }
+
+            card = {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {
+                        "content": title or "Confirm",
+                        "tag": "plain_text",
+                    },
+                    "template": "orange",
+                },
+                "elements": [
+                    {"tag": "markdown", "content": message},
+                    {
+                        "tag": "action",
+                        "actions": [
+                            _button("✅ Approve Once", "once", "primary"),
+                            _button("🔒 Always Approve", "always"),
+                            _button("❌ Cancel", "cancel", "danger"),
+                        ],
+                    },
+                ],
+            }
+            response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="interactive",
+                payload=json.dumps(card, ensure_ascii=False),
+                reply_to=None,
+                metadata=metadata,
+            )
+            result = self._finalize_send_result(response, "send_slash_confirm failed")
+            if result.success:
+                self._slash_confirm_state[confirm_id] = {
+                    "session_key": session_key,
+                    "chat_id": chat_id,
+                    "chat_type": self._approval_chat_type(
+                        session_key=session_key,
+                        chat_info=chat_info,
+                    ),
+                }
+            return result
+        except Exception as exc:
+            logger.warning("[Feishu] send_slash_confirm failed: %s", exc)
+            return SendResult(success=False, error=str(exc))
+
+    @staticmethod
+    def _approval_chat_type(
+        *, session_key: str, chat_info: Dict[str, Any]
+    ) -> str:
+        """Resolve DM/group context without trusting a failed chat lookup."""
+        marker = str(session_key or "").lower()
+        if any(part in marker for part in (":group:", ":channel:", ":forum:")):
+            return "group"
+        if any(part in marker for part in (":dm:", ":direct:")):
+            return "dm"
+        resolved = str(chat_info.get("type") or "").strip().lower()
+        return resolved if resolved in {"dm", "group", "forum"} else "group"
 
     @staticmethod
     def _build_update_prompt_card(*, prompt: str, default: str, prompt_id: int) -> Dict[str, Any]:
@@ -2185,6 +2284,28 @@ class FeishuAdapter(BasePlatformAdapter):
             "header": {
                 "title": {"content": f"{icon} {label}", "tag": "plain_text"},
                 "template": "red" if choice == "deny" else "green",
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"{icon} **{label}** by {user_name}",
+                },
+            ],
+        }
+
+    @staticmethod
+    def _build_resolved_slash_confirm_card(
+        *, choice: str, user_name: str
+    ) -> Dict[str, Any]:
+        """Build the inline replacement card for a slash confirmation."""
+        cancelled = choice == "cancel"
+        label = _SLASH_CONFIRM_LABEL_MAP.get(choice, "Resolved")
+        icon = "❌" if cancelled else "✅"
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"content": f"{icon} {label}", "tag": "plain_text"},
+                "template": "red" if cancelled else "green",
             },
             "elements": [
                 {
@@ -2714,6 +2835,10 @@ class FeishuAdapter(BasePlatformAdapter):
             action_value.get("hermes_update_prompt_action")
             if isinstance(action_value, dict) else None
         )
+        slash_confirm_action = (
+            action_value.get("hermes_slash_confirm_action")
+            if isinstance(action_value, dict) else None
+        )
 
         if hermes_action:
             return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
@@ -2723,11 +2848,24 @@ class FeishuAdapter(BasePlatformAdapter):
                 action_value=action_value,
                 loop=loop,
             )
+        if slash_confirm_action:
+            return self._handle_slash_confirm_card_action(
+                event=event,
+                action_value=action_value,
+                loop=loop,
+            )
 
         self._submit_on_loop(loop, self._handle_card_action_event(data))
         if P2CardActionTriggerResponse is None:
             return None
-        return P2CardActionTriggerResponse()
+        response = P2CardActionTriggerResponse()
+        ack_card = action_value.get("hermes_ack_card") if isinstance(action_value, dict) else None
+        if isinstance(ack_card, dict) and CallBackCard is not None:
+            card = CallBackCard()
+            card.type = "raw"
+            card.data = ack_card
+            response.card = card
+        return response
 
     @staticmethod
     def _loop_accepts_callbacks(loop: Any) -> bool:
@@ -2748,15 +2886,90 @@ class FeishuAdapter(BasePlatformAdapter):
         future.add_done_callback(self._log_background_failure)
         return True
 
-    def _is_interactive_operator_authorized(self, open_id: str) -> bool:
+    def _interactive_operator_allowed_ids(self, chat_id: str = "") -> set[str]:
+        """Return configured identities allowed to answer gated card prompts."""
+        allowed_ids = set(self._admins) | set(self._allowed_group_users)
+        rule = self._group_rules.get(chat_id) if chat_id else None
+        if rule:
+            allowed_ids |= set(rule.allowlist)
+        return allowed_ids
+
+    def _is_interactive_operator_authorized(
+        self, open_id: str, chat_id: str = ""
+    ) -> bool:
         """Return whether this card-action operator may answer gated prompts."""
         normalized = str(open_id or "").strip()
         if not normalized:
             return False
-        allowed_ids = set(self._admins) | set(self._allowed_group_users)
+        allowed_ids = self._interactive_operator_allowed_ids(chat_id)
         if not allowed_ids:
             return True
         return "*" in allowed_ids or normalized in allowed_ids
+
+    def _gateway_interactive_operator_authorized(
+        self,
+        *,
+        open_id: str,
+        chat_id: str,
+        chat_type: str,
+        user_name: str,
+    ) -> Optional[bool]:
+        """Reuse gateway pairing/allowlist auth when the adapter is bound."""
+        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        auth_fn = getattr(runner, "_is_user_authorized", None)
+        if not callable(auth_fn):
+            return None
+        try:
+            from gateway.session import SessionSource
+
+            source = SessionSource(
+                platform=Platform.FEISHU,
+                chat_id=chat_id,
+                chat_type="dm" if chat_type == "dm" else "group",
+                user_id=open_id,
+                user_name=user_name or None,
+            )
+            return bool(auth_fn(source))
+        except Exception:
+            logger.debug(
+                "[Feishu] Failed to reuse gateway auth for an interactive action",
+                exc_info=True,
+            )
+            return None
+
+    def _is_card_action_operator_authorized(
+        self,
+        *,
+        open_id: str,
+        state: Dict[str, str],
+        user_name: str,
+    ) -> bool:
+        """Authorize a gated card click through the same path as chat input."""
+        chat_id = str(state.get("chat_id", "") or "")
+        if "chat_type" not in state:
+            # Backward-compatible path for in-memory state created by older
+            # callers/tests. Newly sent approvals always persist chat_type and
+            # therefore use the pairing-aware path below.
+            return self._is_interactive_operator_authorized(open_id, chat_id)
+        chat_type = str(state.get("chat_type", "group") or "group")
+        gateway_allowed = self._gateway_interactive_operator_authorized(
+            open_id=open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            user_name=user_name,
+        )
+        if gateway_allowed is None:
+            if not self._interactive_operator_allowed_ids(chat_id):
+                return False
+            if not self._is_interactive_operator_authorized(open_id, chat_id):
+                return False
+        elif not gateway_allowed:
+            return False
+
+        if chat_type != "dm":
+            sender_id = SimpleNamespace(open_id=open_id, user_id="")
+            return self._allow_group_message(sender_id, chat_id, is_bot=False)
+        return True
 
     def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
         """Schedule approval resolution and build the synchronous callback response."""
@@ -2772,8 +2985,12 @@ class FeishuAdapter(BasePlatformAdapter):
 
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
-        sender_id = SimpleNamespace(open_id=open_id, user_id=str(getattr(operator, "user_id", "") or ""))
-        if not self._allow_group_message(sender_id, state.get("chat_id", ""), is_bot=False):
+        user_name = self._get_cached_sender_name(open_id) or open_id
+        if not self._is_card_action_operator_authorized(
+            open_id=open_id,
+            state=state,
+            user_name=user_name,
+        ):
             logger.warning("[Feishu] Unauthorized approval click by %s", open_id or "<unknown>")
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
@@ -2787,8 +3004,6 @@ class FeishuAdapter(BasePlatformAdapter):
                 callback_chat_id,
             )
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
-
-        user_name = self._get_cached_sender_name(open_id) or open_id
 
         chat_context = getattr(event, "context", None)
         chat_id = str(getattr(chat_context, "open_chat_id", "") or "")
@@ -2811,6 +3026,76 @@ class FeishuAdapter(BasePlatformAdapter):
             card = CallBackCard()
             card.type = "raw"
             card.data = self._build_resolved_approval_card(choice=choice, user_name=user_name)
+            response.card = card
+        return response
+
+    def _handle_slash_confirm_card_action(
+        self,
+        *,
+        event: Any,
+        action_value: Dict[str, Any],
+        loop: Any,
+    ) -> Any:
+        """Schedule slash-confirm resolution and replace the card inline."""
+        confirm_id = str(action_value.get("confirm_id") or "")
+        choice = str(action_value.get("hermes_slash_confirm_action") or "")
+        if not confirm_id or choice not in _SLASH_CONFIRM_LABEL_MAP:
+            logger.debug("[Feishu] Invalid slash-confirm card action, ignoring")
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        state = self._slash_confirm_state.get(confirm_id)
+        if not state:
+            logger.debug(
+                "[Feishu] Slash confirm %s already resolved or unknown", confirm_id
+            )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        operator = getattr(event, "operator", None)
+        open_id = str(getattr(operator, "open_id", "") or "")
+        user_name = self._get_cached_sender_name(open_id) or open_id
+        if not self._is_card_action_operator_authorized(
+            open_id=open_id,
+            state=state,
+            user_name=user_name,
+        ):
+            logger.warning(
+                "[Feishu] Unauthorized slash-confirm click by %s",
+                open_id or "<unknown>",
+            )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        callback_chat_id = str(
+            getattr(getattr(event, "context", None), "open_chat_id", "") or ""
+        )
+        expected_chat_id = str(state.get("chat_id", "") or "")
+        if callback_chat_id and expected_chat_id and callback_chat_id != expected_chat_id:
+            logger.warning(
+                "[Feishu] Slash-confirm callback chat mismatch for %s", confirm_id
+            )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        if not self._submit_on_loop(
+            loop,
+            self._resolve_slash_confirm(
+                confirm_id,
+                choice,
+                user_name,
+                open_id=open_id,
+                chat_id=callback_chat_id or expected_chat_id,
+            ),
+        ):
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        if P2CardActionTriggerResponse is None:
+            return None
+        response = P2CardActionTriggerResponse()
+        if CallBackCard is not None:
+            card = CallBackCard()
+            card.type = "raw"
+            card.data = self._build_resolved_slash_confirm_card(
+                choice=choice,
+                user_name=user_name,
+            )
             response.card = card
         return response
 
@@ -2885,7 +3170,11 @@ class FeishuAdapter(BasePlatformAdapter):
         if not state:
             logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
             return
-        if not self._is_interactive_operator_authorized(open_id):
+        if not self._is_card_action_operator_authorized(
+            open_id=open_id,
+            state=state,
+            user_name=user_name,
+        ):
             logger.warning("[Feishu] Unauthorized approval click by %s for approval %s", open_id or "<unknown>", approval_id)
             return
         expected_chat_id = str(state.get("chat_id", "") or "")
@@ -2924,6 +3213,69 @@ class FeishuAdapter(BasePlatformAdapter):
                         logger.debug("[Feishu] expired-approval notice failed", exc_info=True)
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
+
+    async def _resolve_slash_confirm(
+        self,
+        confirm_id: str,
+        choice: str,
+        user_name: str,
+        *,
+        open_id: str = "",
+        chat_id: str = "",
+    ) -> None:
+        """Resolve a slash-command card and send the handler result."""
+        state = self._slash_confirm_state.get(confirm_id)
+        if not state:
+            logger.debug(
+                "[Feishu] Slash confirm %s already resolved or unknown", confirm_id
+            )
+            return
+        if not self._is_card_action_operator_authorized(
+            open_id=open_id,
+            state=state,
+            user_name=user_name,
+        ):
+            logger.warning(
+                "[Feishu] Unauthorized slash-confirm click by %s for %s",
+                open_id or "<unknown>",
+                confirm_id,
+            )
+            return
+        expected_chat_id = str(state.get("chat_id", "") or "")
+        if expected_chat_id and chat_id and expected_chat_id != chat_id:
+            logger.warning("[Feishu] Slash confirm %s chat mismatch", confirm_id)
+            return
+
+        state = self._slash_confirm_state.pop(confirm_id, None)
+        if not state:
+            return
+        try:
+            from tools import slash_confirm as slash_confirm_module
+
+            result_text = await slash_confirm_module.resolve(
+                state["session_key"],
+                confirm_id,
+                choice,
+            )
+            if result_text:
+                await self.send(
+                    expected_chat_id or chat_id,
+                    result_text,
+                    metadata=None,
+                )
+            logger.info(
+                "Feishu button resolved slash-confirm for session %s "
+                "(choice=%s, user=%s)",
+                state["session_key"],
+                choice,
+                user_name,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to resolve slash-confirm from Feishu button: %s",
+                exc,
+                exc_info=True,
+            )
 
     async def _resolve_update_prompt(
         self,
@@ -3039,6 +3391,154 @@ class FeishuAdapter(BasePlatformAdapter):
         self._card_action_tokens[token] = now
         return False
 
+    @staticmethod
+    def _json_from_last_stdout_line(stdout: str) -> Optional[Dict[str, Any]]:
+        for line in reversed((stdout or "").splitlines()):
+            value = line.strip()
+            if not value:
+                continue
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+            return parsed if isinstance(parsed, dict) else None
+        return None
+
+    @staticmethod
+    def _resolve_card_action_script(script_name: str) -> Optional[Path]:
+        if not script_name:
+            return None
+        scripts_dir = (get_hermes_home() / "scripts").resolve()
+        script_path = (scripts_dir / script_name).resolve()
+        try:
+            script_path.relative_to(scripts_dir)
+        except ValueError:
+            return None
+        return script_path if script_path.is_file() else None
+
+    async def _send_card_action_message(
+        self, message: Dict[str, Any], default_chat_id: str
+    ) -> None:
+        chat_id = str(message.get("chat_id") or default_chat_id or "").strip()
+        if not chat_id:
+            return
+        message_type = str(
+            message.get("msg_type") or message.get("message_type") or ""
+        ).strip().lower()
+        if message_type in {"interactive", "card"} and isinstance(
+            message.get("card"), dict
+        ):
+            try:
+                await self._feishu_send_with_retry(
+                    chat_id=chat_id,
+                    msg_type="interactive",
+                    payload=json.dumps(message["card"], ensure_ascii=False),
+                    reply_to=None,
+                    metadata=None,
+                )
+            except Exception as exc:
+                logger.warning("[Feishu] Card action interactive send failed: %s", exc)
+            return
+        text = str(message.get("text") or message.get("content") or "").strip()
+        if text:
+            await self.send(chat_id, text, metadata=None)
+
+    async def _run_configured_card_action(
+        self,
+        action_payload: Dict[str, Any],
+        chat_id: str,
+        open_id: str,
+    ) -> bool:
+        action_id = str(action_payload.get("action_id") or "").strip()
+        handlers = self.config.extra.get("card_action_handlers")
+        handler = handlers.get(action_id) if isinstance(handlers, dict) else None
+        if not isinstance(handler, dict):
+            return False
+
+        sender_id = SimpleNamespace(open_id=open_id, user_id=None, union_id=None)
+        if not self._allow_group_message(sender_id, chat_id, is_bot=False):
+            logger.warning(
+                "[Feishu] Unauthorized card action %s by %s",
+                action_id,
+                open_id or "<unknown>",
+            )
+            return True
+
+        script_path = self._resolve_card_action_script(str(handler.get("script") or ""))
+        if script_path is None:
+            logger.warning(
+                "[Feishu] Invalid card action script for %s: %r",
+                action_id,
+                handler.get("script"),
+            )
+            return True
+
+        handler_args = handler.get("args") if isinstance(handler.get("args"), list) else []
+        argv = [sys.executable, str(script_path), *[str(arg) for arg in handler_args]]
+        process: Optional[asyncio.subprocess.Process] = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(script_path.parent),
+                env=os.environ.copy(),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(
+                    json.dumps(action_payload, ensure_ascii=False).encode()
+                ),
+                timeout=90,
+            )
+        except asyncio.TimeoutError:
+            if process is not None:
+                process.kill()
+                await process.wait()
+            logger.warning("[Feishu] Card action handler timed out for %s", action_id)
+            await self._send_card_action_message(
+                {"text": f"卡片动作处理超时：{action_id}"}, chat_id
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[Feishu] Card action handler failed to start for %s: %s",
+                action_id,
+                exc,
+            )
+            await self._send_card_action_message(
+                {"text": f"卡片动作处理失败：{action_id}"}, chat_id
+            )
+            return True
+
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        if process.returncode != 0:
+            detail = stderr_text or stdout_text.strip() or f"exit {process.returncode}"
+            logger.warning(
+                "[Feishu] Card action handler %s exited with %s: %s",
+                action_id,
+                process.returncode,
+                detail,
+            )
+            await self._send_card_action_message(
+                {"text": f"卡片动作处理失败：{detail[:800]}"}, chat_id
+            )
+            return True
+
+        result = self._json_from_last_stdout_line(stdout_text)
+        if result is None:
+            logger.warning(
+                "[Feishu] Card action handler %s returned non-JSON output", action_id
+            )
+            return True
+        messages = result.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict):
+                    await self._send_card_action_message(message, chat_id)
+        return True
+
     async def _handle_card_action_event(self, data: Any) -> None:
         """Route Feishu interactive card button clicks as synthetic COMMAND events."""
         event = getattr(data, "event", None)
@@ -3059,10 +3559,40 @@ class FeishuAdapter(BasePlatformAdapter):
         action_tag = str(getattr(action, "tag", "") or "button")
         action_value = getattr(action, "value", {}) or {}
 
+        if not isinstance(action_value, dict):
+            action_value = {}
+        form_value = getattr(action, "form_value", {}) or {}
+        if not isinstance(form_value, dict):
+            form_value = {}
+        action_payload: Dict[str, Any] = dict(action_value)
+        action_payload.setdefault(
+            "action_id", action_value.get("hermes_card_action") or action_tag
+        )
+        action_payload.setdefault("open_chat_id", chat_id)
+        action_payload.setdefault("operator_open_id", open_id)
+        action_payload.setdefault("card_action_token", token)
+        action_payload["action_tag"] = action_tag
+        action_payload["action_value"] = action_value
+        if form_value:
+            action_payload["form_value"] = form_value
+        for optional_name in (
+            "name",
+            "option",
+            "input_value",
+            "options",
+            "checked",
+        ):
+            optional_value = getattr(action, optional_name, None)
+            if optional_value is not None:
+                action_payload[optional_name] = optional_value
+
+        if await self._run_configured_card_action(action_payload, chat_id, open_id):
+            return
+
         synthetic_text = f"/card {action_tag}"
-        if action_value:
+        if action_payload:
             try:
-                synthetic_text += f" {json.dumps(action_value, ensure_ascii=False)}"
+                synthetic_text += f" {json.dumps(action_payload, ensure_ascii=False)}"
             except Exception:
                 pass
 
@@ -3083,7 +3613,9 @@ class FeishuAdapter(BasePlatformAdapter):
             message_type=MessageType.COMMAND,
             source=source,
             raw_message=data,
-            message_id=token or str(uuid.uuid4()),
+            message_id=str(
+                getattr(context, "open_message_id", "") or token or uuid.uuid4()
+            ),
             channel_prompt=self._resolve_channel_prompt(chat_id),
             timestamp=datetime.now(),
         )
@@ -3409,13 +3941,12 @@ class FeishuAdapter(BasePlatformAdapter):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
-        return f"{session_key}:media:{event.message_type.value}"
+        return f"{session_key}:media"
 
     @staticmethod
     def _media_batch_is_compatible(existing: MessageEvent, incoming: MessageEvent) -> bool:
         return (
-            existing.message_type == incoming.message_type
-            and existing.reply_to_message_id == incoming.reply_to_message_id
+            existing.reply_to_message_id == incoming.reply_to_message_id
             and existing.reply_to_text == incoming.reply_to_text
             and existing.source.thread_id == incoming.source.thread_id
         )
@@ -3434,6 +3965,8 @@ class FeishuAdapter(BasePlatformAdapter):
             return
         existing.media_urls.extend(event.media_urls)
         existing.media_types.extend(event.media_types)
+        if event.message_type == MessageType.PHOTO:
+            existing.message_type = MessageType.PHOTO
         if event.text:
             existing.text = self._merge_caption(existing.text, event.text)
         existing.timestamp = event.timestamp
@@ -3448,10 +3981,29 @@ class FeishuAdapter(BasePlatformAdapter):
             self._flush_media_batch,
         )
 
+    def _media_batch_delay_for_event(self, event: MessageEvent | None) -> float:
+        if not event:
+            return self._media_batch_delay_seconds
+        media_types = event.media_types or []
+        has_audio = any(mtype.startswith("audio/") for mtype in media_types) or (
+            not media_types
+            and event.message_type in (MessageType.AUDIO, MessageType.VOICE)
+        )
+        if has_audio:
+            return min(
+                self._media_batch_delay_seconds,
+                _DEFAULT_MEDIA_BATCH_DELAY_SECONDS,
+            )
+        return self._media_batch_delay_seconds
+
     async def _flush_media_batch(self, key: str) -> None:
         current_task = asyncio.current_task()
         try:
-            await asyncio.sleep(self._media_batch_delay_seconds)
+            await asyncio.sleep(
+                self._media_batch_delay_for_event(
+                    self._pending_media_batches.get(key)
+                )
+            )
             await self._flush_media_batch_now(key)
         finally:
             if self._pending_media_batch_tasks.get(key) is current_task:
@@ -4921,7 +5473,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_client = FeishuWSClient(
             app_id=self._app_id,
             app_secret=self._app_secret,
-            log_level=lark.LogLevel.INFO,
+            log_level=lark.LogLevel.WARNING,
             event_handler=self._event_handler,
             domain=domain,
             # Channel SDK signaling tag: without this UA tag the Feishu

@@ -78,6 +78,70 @@ class TestTelegramSendClarify:
         _clear_clarify_state()
 
     @pytest.mark.asyncio
+    async def test_default_choice_buttons_use_numeric_labels(self):
+        adapter = _make_adapter()
+        mock_msg = MagicMock()
+        mock_msg.message_id = 104
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, **kwargs: {"text": text, **kwargs},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: rows,
+            ),
+        ):
+            await adapter.send_clarify(
+                chat_id="12345",
+                question="Pick one",
+                choices=["系统状态", "记录想法"],
+                clarify_id="cid-default-labels",
+                session_key="sk-default-labels",
+            )
+
+        markup = adapter._bot.send_message.call_args.kwargs["reply_markup"]
+        assert [row[0]["text"] for row in markup] == [
+            "1",
+            "2",
+            "✏️ Other (type answer)",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_choice_label_mode_uses_option_text_on_buttons(self):
+        adapter = _make_adapter({"clarify_button_labels": "choice"})
+        mock_msg = MagicMock()
+        mock_msg.message_id = 105
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, **kwargs: {"text": text, **kwargs},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: rows,
+            ),
+        ):
+            await adapter.send_clarify(
+                chat_id="12345",
+                question="Pick one",
+                choices=["系统状态", "记录想法"],
+                clarify_id="cid-choice-labels",
+                session_key="sk-choice-labels",
+            )
+
+        markup = adapter._bot.send_message.call_args.kwargs["reply_markup"]
+        assert [row[0]["text"] for row in markup] == [
+            "系统状态",
+            "记录想法",
+            "✏️ Other (type answer)",
+        ]
+
+    @pytest.mark.asyncio
     async def test_multi_choice_renders_buttons_and_other(self):
         adapter = _make_adapter()
         mock_msg = MagicMock()
@@ -277,4 +341,3 @@ class TestBaseAdapterClarifyFallback:
         assert "Pick a fruit" in text
         assert "1." in text and "apple" in text
         assert "2." in text and "banana" in text
-

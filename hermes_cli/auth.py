@@ -955,7 +955,12 @@ def _oauth_trace(event: str, *, sequence_id: Optional[str] = None, **fields: Any
 # =============================================================================
 
 def _auth_file_path() -> Path:
-    path = get_hermes_home() / "auth.json"
+    configured_path = os.environ.get("HERMES_AUTH_FILE", "").strip()
+    path = (
+        Path(configured_path).expanduser()
+        if configured_path
+        else get_hermes_home() / "auth.json"
+    )
     # Seat belt: if pytest is running and HERMES_HOME resolves to the real
     # user's auth store, refuse rather than silently corrupt it. This catches
     # tests that forgot to monkeypatch HERMES_HOME, tests invoked without the

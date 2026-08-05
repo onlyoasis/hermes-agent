@@ -2008,6 +2008,7 @@ DEFAULT_CONFIG = {
         "extra": {
             "rich_messages": False,     # Bot API 10.1 rich messages (tables/task lists/details/math) render natively; set True to opt in. Default stays legacy MarkdownV2 because rich messages can be hard to copy as plain text in Telegram clients.
             "rich_drafts": False,       # Experimental Bot API 10.1 rich draft previews during Telegram DM streaming. Default off because Telegram Desktop/macOS can visually overlay rich draft frames until the chat redraws.
+            "clarify_button_labels": "numeric",  # "choice" puts option text directly on clarify buttons
         },
     },
 

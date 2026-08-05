@@ -74,6 +74,11 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     ``direct_messages_topic_id`` when the Bot API supports it.
     """
     thread_id = getattr(source, "thread_id", None)
+    if (
+        _platform_name(getattr(source, "platform", None)) == "feishu"
+        and getattr(source, "chat_type", None) == "dm"
+    ):
+        thread_id = None
     metadata = {"thread_id": thread_id} if thread_id is not None else {}
     # Slack workspace identity is durable routing state, not ephemeral event
     # metadata. Carry it on every outbound path (including unthreaded sends)

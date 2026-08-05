@@ -5923,6 +5923,46 @@ def resolve_provider_client(
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                 else (client, final_model))
 
+    # ── MiniMax OAuth (Anthropic Messages API) ───────────────────────
+    if provider == "minimax-oauth":
+        try:
+            from hermes_cli.auth import (
+                AuthError,
+                resolve_minimax_oauth_runtime_credentials,
+            )
+            from agent.anthropic_adapter import build_anthropic_client
+        except ImportError:
+            logger.debug(
+                "resolve_provider_client: MiniMax OAuth runtime unavailable"
+            )
+            return None, None
+
+        try:
+            creds = resolve_minimax_oauth_runtime_credentials(
+                as_token_provider=True,
+            )
+        except AuthError as exc:
+            logger.debug("resolve_provider_client: MiniMax OAuth: %s", exc)
+            return None, None
+
+        api_key = creds.get("api_key")
+        base_url = str(creds.get("base_url", "") or "").rstrip("/")
+        if not api_key or not base_url:
+            return None, None
+
+        final_model = _normalize_resolved_model(model, provider)
+        real_client = build_anthropic_client(api_key, base_url)
+        client = AnthropicAuxiliaryClient(
+            real_client,
+            final_model,
+            api_key,
+            base_url,
+            is_oauth=False,
+        )
+        if async_mode:
+            return AsyncAnthropicAuxiliaryClient(client), final_model
+        return client, final_model
+
     # ── xAI Grok OAuth (device code → Responses API) ───────────────
     # Without this branch, an xai-oauth main provider falls through to the
     # generic ``oauth_external`` arm below and returns ``(None, None)``,
