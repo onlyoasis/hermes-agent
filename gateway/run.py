@@ -8620,6 +8620,89 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return text
         return (enriched_text or text).strip()
 
+    def _run_pre_gateway_dispatch_hooks(self, event: MessageEvent) -> Optional[str]:
+        if getattr(event, "internal", False) or getattr(
+            event, "_hermes_pre_gateway_dispatch_done", False
+        ):
+            return None
+
+        try:
+            from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+
+            hook_results = _invoke_hook(
+                "pre_gateway_dispatch",
+                event=event,
+                gateway=self,
+                session_store=getattr(self, "session_store", None),
+            )
+        except Exception as hook_error:
+            logger.warning("pre_gateway_dispatch invocation failed: %s", hook_error)
+            return None
+
+        event._hermes_pre_gateway_dispatch_done = True
+        source = event.source
+        for result in hook_results:
+            if not isinstance(result, dict):
+                continue
+            action = result.get("action")
+            if action == "skip":
+                logger.info(
+                    "pre_gateway_dispatch skip: reason=%s platform=%s chat=%s",
+                    result.get("reason"),
+                    source.platform.value if source.platform else "unknown",
+                    source.chat_id or "unknown",
+                )
+                return "skip"
+            if action == "rewrite":
+                new_text = result.get("text")
+                if isinstance(new_text, str):
+                    event.text = new_text
+                return None
+            if action == "allow":
+                return None
+        return None
+
+    async def _handle_active_session_pre_dispatch(
+        self,
+        event: MessageEvent,
+        session_key: str,
+    ) -> bool:
+        """Run ingress guards and hooks before a busy message is classified."""
+        try:
+            from gateway.session_context import reset_session_vars
+
+            reset_session_vars()
+        except Exception:
+            logger.debug(
+                "reset_session_vars failed at busy pre-dispatch entry",
+                exc_info=True,
+            )
+
+        if getattr(event, "internal", False):
+            return False
+
+        source = event.source
+        if (
+            getattr(source, "platform", None) == Platform.SLACK
+            and _is_slack_ignored_channel(
+                getattr(self, "config", None), getattr(source, "chat_id", None)
+            )
+        ):
+            logger.info(
+                "Dropping Slack message from configured ignored channel %s",
+                getattr(source, "chat_id", None),
+            )
+            return True
+
+        if (
+            getattr(self, "_startup_restore_in_progress", False)
+            and not getattr(event, "_hermes_startup_restore_replay", False)
+        ):
+            self._queue_startup_restore_event(event)
+            return True
+
+        return self._run_pre_gateway_dispatch_hooks(event) == "skip"
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
@@ -10974,6 +11057,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.set_message_handler(self._primary_message_handler())
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
+            adapter.set_busy_session_pre_dispatch_handler(
+                self._primary_busy_session_pre_dispatch_handler()
+            )
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
             _set_reaction = getattr(adapter, "set_reaction_handler", None)
             if callable(_set_reaction):
@@ -12346,6 +12432,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter.set_message_handler(self._primary_message_handler())
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
+                    adapter.set_busy_session_pre_dispatch_handler(
+                        self._primary_busy_session_pre_dispatch_handler()
+                    )
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
                     _set_reaction = getattr(adapter, "set_reaction_handler", None)
                     if callable(_set_reaction):
@@ -13288,6 +13377,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._make_profile_fatal_error_handler(profile_name, platform)
         )
         adapter.set_session_store(self.session_store)
+        adapter.set_busy_session_pre_dispatch_handler(
+            self._make_profile_busy_session_pre_dispatch_handler(profile_name)
+        )
         adapter.set_busy_session_handler(self._handle_active_session_busy_message)
         _set_reaction = getattr(adapter, "set_reaction_handler", None)
         if callable(_set_reaction):
@@ -13493,6 +13585,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return _handler
 
+    def _make_profile_busy_session_pre_dispatch_handler(self, profile_name: str):
+        """Return a profile-scoped busy ingress guard for multiplex adapters."""
+        from hermes_cli.profiles import get_profile_dir
+
+        try:
+            profile_home = get_profile_dir(profile_name)
+        except Exception:
+            profile_home = None
+
+        async def _handler(event, session_key):
+            if getattr(event, "source", None) is not None and not event.source.profile:
+                event.source.profile = profile_name
+            if profile_home is not None:
+                with _profile_runtime_scope(profile_home):
+                    return await self._handle_active_session_pre_dispatch(
+                        event, session_key
+                    )
+            return await self._handle_active_session_pre_dispatch(event, session_key)
+
+        return _handler
+
     def _make_default_profile_message_handler(self):
         """Scope a multiplexed default-profile message from ingress onward."""
         profile_home = Path(get_hermes_home())
@@ -13508,6 +13621,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if getattr(self.config, "multiplex_profiles", False):
             return self._make_default_profile_message_handler()
         return self._handle_message
+
+    def _primary_busy_session_pre_dispatch_handler(self):
+        """Return the correctly scoped busy ingress guard for a primary adapter."""
+        if not getattr(self.config, "multiplex_profiles", False):
+            return self._handle_active_session_pre_dispatch
+
+        profile_home = Path(get_hermes_home())
+
+        async def _handler(event, session_key):
+            with _profile_runtime_scope(profile_home):
+                return await self._handle_active_session_pre_dispatch(
+                    event, session_key
+                )
+
+        return _handler
 
     @staticmethod
     def _adapter_credential_claim(
@@ -14274,49 +14402,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not is_internal:
             self._scale_to_zero_note_real_inbound()
 
-        # Fire pre_gateway_dispatch plugin hook for user-originated messages.
-        # Plugins receive the MessageEvent and may return a dict influencing flow:
-        #   {"action": "skip",    "reason": ...}    -> drop (no reply, plugin handled)
-        #   {"action": "rewrite", "text":  ...}     -> replace event.text, continue
-        #   {"action": "allow"}   /   None          -> normal dispatch
-        # Hook runs BEFORE auth so plugins can handle unauthorized senders
-        # (e.g. customer handover ingest) without triggering the pairing flow.
-        if not is_internal:
-            try:
-                from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-                _hook_results = _invoke_hook(
-                    "pre_gateway_dispatch",
-                    event=event,
-                    gateway=self,
-                    # getattr: bare-runner tests build GatewayRunner via
-                    # object.__new__ without __init__ (pitfall #17), and the
-                    # hook must not fail dispatch over a missing attribute.
-                    session_store=getattr(self, "session_store", None),
-                )
-            except Exception as _hook_exc:
-                logger.warning("pre_gateway_dispatch invocation failed: %s", _hook_exc)
-                _hook_results = []
-
-            for _result in _hook_results:
-                if not isinstance(_result, dict):
-                    continue
-                _action = _result.get("action")
-                if _action == "skip":
-                    logger.info(
-                        "pre_gateway_dispatch skip: reason=%s platform=%s chat=%s",
-                        _result.get("reason"),
-                        source.platform.value if source.platform else "unknown",
-                        source.chat_id or "unknown",
-                    )
-                    return None
-                if _action == "rewrite":
-                    _new_text = _result.get("text")
-                    if isinstance(_new_text, str):
-                        event = dataclasses.replace(event, text=_new_text)
-                        source = event.source
-                    break
-                if _action == "allow":
-                    break
+        # Plugins may skip or rewrite user-originated events before auth and
+        # agent dispatch. Busy sessions invoke the same hook before queueing;
+        # the per-event marker keeps this path exactly-once.
+        if self._run_pre_gateway_dispatch_hooks(event) == "skip":
+            return None
 
         if is_internal:
             pass

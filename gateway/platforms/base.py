@@ -2814,6 +2814,9 @@ class BasePlatformAdapter(ABC):
         # registered by a fresher run for the same session.
         self._post_delivery_callbacks: Dict[str, Any] = {}
         self._expected_cancelled_tasks: set[asyncio.Task] = set()
+        self._busy_session_pre_dispatch_handler: Optional[
+            Callable[[MessageEvent, str], Awaitable[bool]]
+        ] = None
         self._busy_session_handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]] = None
         # Optional authorization check, registered by GatewayRunner. Used by
         # adapters that fetch external context (e.g. Slack thread history) to
@@ -3350,6 +3353,13 @@ class BasePlatformAdapter(ABC):
     def set_busy_session_handler(self, handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]]) -> None:
         """Set an optional handler for messages arriving during active sessions."""
         self._busy_session_handler = handler
+
+    def set_busy_session_pre_dispatch_handler(
+        self,
+        handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]],
+    ) -> None:
+        """Set the pre-dispatch guard for messages arriving during active sessions."""
+        self._busy_session_pre_dispatch_handler = handler
 
     def set_reaction_handler(
         self, handler: Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
@@ -5596,6 +5606,24 @@ class BasePlatformAdapter(ABC):
 
         # Check if there's already an active handler for this session
         if session_key in self._active_sessions:
+            # Run runner-owned ingress guards before reading the command. The
+            # hook may rewrite plain text into a control command, which must be
+            # classified by the normal active-session bypass logic below.
+            pre_dispatch_handler = getattr(
+                self, "_busy_session_pre_dispatch_handler", None
+            )
+            if pre_dispatch_handler is not None:
+                try:
+                    if await pre_dispatch_handler(event, session_key):
+                        return
+                except Exception as e:
+                    logger.error(
+                        "[%s] Busy-session pre-dispatch handler failed: %s",
+                        self.name,
+                        e,
+                        exc_info=True,
+                    )
+
             # Certain commands must bypass the active-session guard and be
             # dispatched directly to the gateway runner.  Without this, they
             # are queued as pending messages and either:
