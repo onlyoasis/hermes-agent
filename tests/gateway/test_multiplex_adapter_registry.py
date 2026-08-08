@@ -121,6 +121,9 @@ class _SecondaryRecoveryAdapter:
     def set_busy_session_handler(self, handler):
         self.busy_session_handler = handler
 
+    def set_busy_session_pre_dispatch_handler(self, handler):
+        self.busy_session_pre_dispatch_handler = handler
+
     def set_topic_recovery_fn(self, handler):
         self.topic_recovery_fn = handler
 
@@ -493,5 +496,4 @@ class TestFeishuPortBindingConditional:
 
         connected = await runner._start_one_profile_adapters("reviewer", "/tmp/x", {})
         assert connected == 0  # no error, just nothing connected
-
 
