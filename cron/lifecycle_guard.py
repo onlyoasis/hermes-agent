@@ -277,9 +277,11 @@ def _read_referenced_script(path: Path) -> tuple[Optional[str], bool]:
     # tokenize machine code and feed junk paths into the recursion
     # (including a `ValueError: embedded null byte` from Path.resolve,
     # #76762). Treat it as "nothing to scan" rather than unsafe: a binary
-    # executed by the user is not a referenced *shell script*.
+    # executed by the user is not a referenced *shell script*. Return an
+    # empty string rather than ``None``: ``None`` exclusively means the
+    # local path could not be read and may need a remote-backend fallback.
     if b"\x00" in data:
-        return None, False
+        return "", False
     if len(data) > _MAX_REFERENCED_SCRIPT_BYTES:
         return None, True
     return data.decode("utf-8", errors="replace"), False
