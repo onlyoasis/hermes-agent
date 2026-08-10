@@ -676,22 +676,26 @@ class TestLifecycleGuardModule:
         with pytest.raises(GatewayLifecycleBlocked):
             check_gateway_lifecycle("clean prompt", str(script))
 
-    def test_absolute_path_binary_does_not_crash_guard(self):
-        """#76762: a terminal command invoking a binary by absolute path
-        (e.g. /usr/bin/python3) must not crash the guard with
-        ValueError: embedded null byte.
+    def test_local_binary_skips_remote_script_fallback(self, tmp_path):
+        """A locally recognized binary is not a missing remote script.
 
-        Before the fix, the walk read the binary's bytes, decoded them as
-        text, and re-tokenized machine code containing NUL bytes; the
-        recursion then called Path.resolve() on a path with an embedded NUL
-        and only OSError was caught. Binaries are now skipped as
-        "nothing to scan" and ValueError is tolerated at resolve time.
+        Before the fix, the binary read returned ``(None, False)`` and the
+        guard treated that as a missing local path. It then called the remote
+        reader, whose binary output could recurse into an embedded-NUL path.
         """
         from cron.lifecycle_guard import (
             contains_gateway_lifecycle_command_or_referenced_script,
         )
+
+        binary = tmp_path / "worker"
+        binary.write_bytes(b"\xcf\xfa\xed\xfe\x00binary")
+
+        def remote_reader(_path):
+            raise AssertionError("recognized local binaries must not use remote fallback")
+
         result = contains_gateway_lifecycle_command_or_referenced_script(
-            '/usr/bin/python3 -c "print(1)"'
+            str(binary),
+            read_remote_script=remote_reader,
         )
         assert result is False
 
