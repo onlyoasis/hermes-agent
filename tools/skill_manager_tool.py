@@ -302,6 +302,8 @@ def _background_review_write_guard(
     name: str,
     skill_dir: Path,
     action: str,
+    *,
+    allow_owner_proposal: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Refuse autonomous curator writes, except approved user-owned proposals.
 
@@ -317,15 +319,11 @@ def _background_review_write_guard(
     except Exception:
         return None
 
-    # Pin must be respected by autonomous maintenance. The curator already
-    # skips pinned skills from every auto-transition; the background review
-    # fork is the same kind of autonomous, no-user-present actor, so it must
-    # not write to a pinned skill either (issue #25839). This is stricter than
-    # the foreground ``_pinned_guard`` (which only blocks deletion) precisely
-    # because there is no user in the loop to consent to an edit here.
     try:
         from tools import skill_usage
-        if skill_usage.get_record(name).get("pinned"):
+        usage_data = _load_background_review_usage(skill_usage)
+        usage_rec = usage_data.get(name)
+        if usage_rec and usage_rec.get("pinned"):
             return {
                 "success": False,
                 "error": (
@@ -336,12 +334,13 @@ def _background_review_write_guard(
                 ),
             }
     except Exception:
-        logger.debug("pinned skill guard lookup failed for %s", name, exc_info=True)
+        logger.debug("skill provenance lookup failed for %s", name, exc_info=True)
         return {
             "success": False,
             "error": (
                 f"Refusing background curator {action} for skill '{name}': "
-                "pinned status could not be verified."
+                "agent ownership could not be verified because the provenance "
+                "record is unavailable or unreadable."
             ),
         }
 
@@ -367,7 +366,6 @@ def _background_review_write_guard(
         }
 
     try:
-        from tools import skill_usage
         if skill_usage.is_protected_builtin(name):
             return {
                 "success": False,
@@ -393,8 +391,8 @@ def _background_review_write_guard(
                 ),
             }
         # Skills that are not curator-managed are off-limits to autonomous
-        # curation. A local user-owned edit may only become a pending proposal
-        # when the user has enabled skill write approval; it never applies here.
+        # curation. The preflight may turn the four allowed local mutations
+        # into an immediate pending record, but handlers still refuse them.
         #
         # A MISSING record and an explicit `created_by: null` must resolve
         # IDENTICALLY (issue #67140). Keying on `isinstance(usage_rec, dict)`
@@ -404,11 +402,11 @@ def _background_review_write_guard(
         # same write was refused from then on. "Allowed exactly once" is not a
         # policy — it is a race with our own bookkeeping. Fail closed for both
         # shapes; `hermes curator adopt <name>` is the supported way in.
-        usage_data = skill_usage.load_usage()
-        usage_rec = usage_data.get(name)
         if not skill_usage._is_curator_managed_record(usage_rec):
-            if _background_review_can_stage_user_owned_write(action, skill_dir):
-                return None
+            if allow_owner_proposal and _background_review_can_stage_user_owned_write(
+                action, skill_dir,
+            ):
+                return {"_force_stage": True}
             if isinstance(usage_rec, dict):
                 _detail = f"created_by={usage_rec.get('created_by')!r}"
             else:
@@ -433,6 +431,22 @@ def _background_review_write_guard(
             ),
         }
     return None
+
+
+def _load_background_review_usage(skill_usage: Any) -> Dict[str, Dict[str, Any]]:
+    """Read the curator provenance sidecar without load_usage's compatibility fallback.
+
+    Missing sidecars represent a normal user-owned skill. A malformed,
+    unreadable, or non-object sidecar cannot establish ownership or pin state,
+    so autonomous review must refuse rather than treat it as missing.
+    """
+    path = skill_usage._usage_file()
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
+        raise ValueError("usage sidecar is not an object map")
+    return data
 
 
 def _background_review_can_stage_user_owned_write(action: str, skill_dir: Path) -> bool:
@@ -502,7 +516,9 @@ def _background_review_preflight(action: str, name: str) -> Optional[Dict[str, A
     existing = _find_skill(name)
     if not existing:
         return None
-    return _background_review_write_guard(name, existing["path"], action)
+    return _background_review_write_guard(
+        name, existing["path"], action, allow_owner_proposal=True,
+    )
 
 
 def _curator_consolidation_delete_guard(
@@ -1444,6 +1460,25 @@ _skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
 )
 
 
+def _stage_skill_write(action, name, *, message="", **payload_kwargs):
+    """Persist the current skill_manage call as a pending approval record."""
+    from tools import write_approval as wa
+
+    payload = {"action": action, "name": name}
+    payload.update({k: v for k, v in payload_kwargs.items() if v is not None})
+    gist = wa.skill_gist(
+        action, name,
+        content=payload.get("content") or "",
+        file_path=payload.get("file_path") or "",
+        old_string=payload.get("old_string") or "",
+        new_string=payload.get("new_string") or "",
+    )
+    record = wa.stage_write(wa.SKILLS, payload, summary=gist, origin=wa.current_origin())
+    return json.dumps(
+        {"success": True, "staged": True, "pending_id": record["id"],
+         "gist": gist, "message": message},
+        ensure_ascii=False,
+    )
 def _apply_skill_write_gate(action, name, **payload_kwargs):
     """Evaluate the skill write gate. Returns a JSON tool-result string when the
     write should NOT proceed (blocked or staged), or None to perform the real
@@ -1465,22 +1500,7 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
     if decision.blocked:
         return tool_error(decision.message, success=False)
 
-    # stage — record the full skill_manage kwargs so approval can replay it.
-    payload = {"action": action, "name": name}
-    payload.update({k: v for k, v in payload_kwargs.items() if v is not None})
-    gist = wa.skill_gist(
-        action, name,
-        content=payload_kwargs.get("content") or "",
-        file_path=payload_kwargs.get("file_path") or "",
-        old_string=payload_kwargs.get("old_string") or "",
-        new_string=payload_kwargs.get("new_string") or "",
-    )
-    record = wa.stage_write(wa.SKILLS, payload, summary=gist, origin=wa.current_origin())
-    return json.dumps(
-        {"success": True, "staged": True, "pending_id": record["id"],
-         "gist": gist, "message": decision.message},
-        ensure_ascii=False,
-    )
+    return _stage_skill_write(action, name, message=decision.message, **payload_kwargs)
 
 
 def apply_skill_pending(payload: Dict[str, Any]) -> str:
@@ -1572,8 +1592,29 @@ def skill_manage(
 
     Returns JSON string with results.
     """
+    payload_kwargs = {
+        "content": content,
+        "category": category,
+        "file_path": file_path,
+        "file_content": file_content,
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": replace_all,
+        "absorbed_into": absorbed_into,
+    }
     preflight = _background_review_preflight(action, name)
     if preflight is not None:
+        if preflight.get("_force_stage"):
+            return _stage_skill_write(
+                action,
+                name,
+                message=(
+                    "Staged for approval (background review proposed a "
+                    "user-owned skill change). Not yet saved — review with "
+                    "/skills pending."
+                ),
+                **payload_kwargs,
+            )
         return json.dumps(preflight, ensure_ascii=False)
 
     # Approval gate: when on, stages the write for review (skills are too large
@@ -1581,10 +1622,7 @@ def skill_manage(
     # (default) passes straight through. The gate is bypassed when this call is
     # itself replaying an already-approved staged write (_skill_apply_pending).
     gate_result = _apply_skill_write_gate(
-        action, name, content=content, category=category,
-        file_path=file_path, file_content=file_content,
-        old_string=old_string, new_string=new_string,
-        replace_all=replace_all, absorbed_into=absorbed_into,
+        action, name, **payload_kwargs,
     )
     if gate_result is not None:
         return gate_result

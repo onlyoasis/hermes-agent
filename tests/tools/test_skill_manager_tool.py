@@ -584,8 +584,6 @@ class TestBackgroundReviewUserOwnedApprovalStaging:
     @pytest.mark.parametrize(
         ("patch_target", "patch_value", "expected_error"),
         [
-            ("tools.skill_usage.get_record", lambda name: {"pinned": True}, "pinned"),
-            ("tools.skill_usage.get_record", _raise_lookup_error, "could not be verified"),
             ("agent.skill_utils.is_external_skill_path", lambda path: True, "externally owned"),
             ("agent.skill_utils.is_external_skill_path", _raise_lookup_error, "could not be verified"),
             ("tools.skill_usage.is_hub_installed", lambda name: True, "hub-installed"),
@@ -632,8 +630,11 @@ class TestBackgroundReviewUserOwnedApprovalStaging:
         assert wa.pending_count(wa.SKILLS) == 0
         assert "Do the thing." in (skills_root / "user-skill" / "SKILL.md").read_text()
 
-    def test_ownership_lookup_error_is_rejected_instead_of_staged(self, tmp_path, monkeypatch):
-        """A missing provenance record cannot use the proposal exception."""
+    @pytest.mark.parametrize("sidecar_kind", ["corrupt_json", "unreadable_directory"])
+    def test_unreadable_usage_sidecar_is_rejected_instead_of_staged(
+        self, tmp_path, monkeypatch, sidecar_kind,
+    ):
+        """A broken real sidecar must not become a missing user-owned record."""
         from hermes_cli.config import load_config, save_config
         from tools import write_approval as wa
         from tools.skill_provenance import (
@@ -651,13 +652,55 @@ class TestBackgroundReviewUserOwnedApprovalStaging:
             assert json.loads(skill_manage(
                 action="create", name="user-skill", content=VALID_SKILL_CONTENT,
             ))["success"] is True
+            sidecar = skills_root / ".usage.json"
+            if sidecar_kind == "corrupt_json":
+                sidecar.write_text("{not json", encoding="utf-8")
+            else:
+                sidecar.mkdir()
             config = load_config()
             config.setdefault("skills", {})["write_approval"] = True
             save_config(config)
 
             token = set_current_write_origin(BACKGROUND_REVIEW)
             try:
-                with patch("tools.skill_usage.load_usage", side_effect=ValueError("corrupt")):
+                result = json.loads(skill_manage(
+                    action="patch", name="user-skill",
+                    old_string="Do the thing.", new_string="Changed.",
+                ))
+            finally:
+                reset_current_write_origin(token)
+
+        assert result["success"] is False
+        assert "could not be verified" in result["error"].lower()
+        assert wa.pending_count(wa.SKILLS) == 0
+        assert "Do the thing." in (skills_root / "user-skill" / "SKILL.md").read_text()
+
+    def test_owner_proposal_stages_despite_later_approval_reads_turning_off(self, tmp_path, monkeypatch):
+        """A proposal decision must not re-read approval and fall through to apply."""
+        from tools import write_approval as wa
+        from tools.skill_manager_tool import mark_background_review_skill_read
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        hermes_home = tmp_path / ".hermes"
+        skills_root = hermes_home / "skills"
+        skills_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+            assert json.loads(skill_manage(
+                action="create", name="user-skill", content=VALID_SKILL_CONTENT,
+            ))["success"] is True
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                mark_background_review_skill_read(skills_root / "user-skill" / "SKILL.md")
+                with patch(
+                    "tools.write_approval.write_approval_enabled",
+                    side_effect=[True, False, True],
+                ) as approval_reads:
                     result = json.loads(skill_manage(
                         action="patch", name="user-skill",
                         old_string="Do the thing.", new_string="Changed.",
@@ -665,9 +708,10 @@ class TestBackgroundReviewUserOwnedApprovalStaging:
             finally:
                 reset_current_write_origin(token)
 
-        assert result["success"] is False
-        assert "could not be verified" in result["error"].lower()
-        assert wa.pending_count(wa.SKILLS) == 0
+        assert result["success"] is True, result
+        assert result["staged"] is True
+        assert approval_reads.call_count == 1
+        assert wa.pending_count(wa.SKILLS) == 1
         assert "Do the thing." in (skills_root / "user-skill" / "SKILL.md").read_text()
 
     def test_approved_user_owned_proposal_replays_as_foreground_write(self, tmp_path, monkeypatch):
@@ -827,14 +871,15 @@ class TestExternalSkillMutations:
             set_current_write_origin,
         )
 
-        def _fake_get_record(skill_name):
-            return {"pinned": True} if skill_name == "my-skill" else {"pinned": False}
-
         with _skill_dir(tmp_path):
             _create_skill("my-skill", VALID_SKILL_CONTENT)
+            sidecar = tmp_path / "strict-usage.json"
+            sidecar.write_text(
+                json.dumps({"my-skill": {"pinned": True}}), encoding="utf-8",
+            )
             token = set_current_write_origin(BACKGROUND_REVIEW)
             try:
-                with patch("tools.skill_usage.get_record", side_effect=_fake_get_record):
+                with patch("tools.skill_usage._usage_file", return_value=sidecar):
                     raw = skill_manage(
                         action="patch",
                         name="my-skill",
@@ -858,12 +903,11 @@ class TestExternalSkillMutations:
 
         with _skill_dir(tmp_path):
             _create_skill("manual-skill", VALID_SKILL_CONTENT)
+            sidecar = tmp_path / "strict-usage.json"
+            sidecar.write_text("{bad json", encoding="utf-8")
             token = set_current_write_origin(BACKGROUND_REVIEW)
             try:
-                with patch(
-                    "tools.skill_usage.load_usage",
-                    side_effect=ValueError("corrupt usage data"),
-                ):
+                with patch("tools.skill_usage._usage_file", return_value=sidecar):
                     raw = skill_manage(
                         action="patch",
                         name="manual-skill",
@@ -946,17 +990,15 @@ class TestBackgroundOwnershipPolicyConsistency:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
         with _skill_dir(tmp_path):
             _create_skill("adopt-me", VALID_SKILL_CONTENT)
-            with patch("tools.skill_usage.load_usage", return_value={}):
+            sidecar = tmp_path / "strict-usage.json"
+            with patch("tools.skill_usage._usage_file", return_value=sidecar):
                 before = self._bg_patch(
                     tmp_path, "adopt-me", "Do the thing.", "Do the new thing.",
                 )
-            with patch(
-                "tools.skill_usage.load_usage",
-                return_value={"adopt-me": {"created_by": "agent"}},
-            ), patch(
-                "tools.skill_usage.get_record",
-                side_effect=lambda n: {"created_by": "agent", "pinned": False},
-            ):
+                sidecar.write_text(
+                    json.dumps({"adopt-me": {"created_by": "agent", "pinned": False}}),
+                    encoding="utf-8",
+                )
                 after = self._bg_patch(
                     tmp_path, "adopt-me", "Do the thing.", "Do the new thing.",
                 )
