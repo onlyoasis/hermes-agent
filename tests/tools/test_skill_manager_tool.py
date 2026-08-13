@@ -630,7 +630,9 @@ class TestBackgroundReviewUserOwnedApprovalStaging:
         assert wa.pending_count(wa.SKILLS) == 0
         assert "Do the thing." in (skills_root / "user-skill" / "SKILL.md").read_text()
 
-    @pytest.mark.parametrize("sidecar_kind", ["corrupt_json", "unreadable_directory"])
+    @pytest.mark.parametrize(
+        "sidecar_kind", ["corrupt_json", "unreadable_directory", "broken_symlink"],
+    )
     def test_unreadable_usage_sidecar_is_rejected_instead_of_staged(
         self, tmp_path, monkeypatch, sidecar_kind,
     ):
@@ -655,8 +657,13 @@ class TestBackgroundReviewUserOwnedApprovalStaging:
             sidecar = skills_root / ".usage.json"
             if sidecar_kind == "corrupt_json":
                 sidecar.write_text("{not json", encoding="utf-8")
-            else:
+            elif sidecar_kind == "unreadable_directory":
                 sidecar.mkdir()
+            else:
+                try:
+                    sidecar.symlink_to(skills_root / "missing-usage-target.json")
+                except OSError:
+                    pytest.skip("Symlinks not supported")
             config = load_config()
             config.setdefault("skills", {})["write_approval"] = True
             save_config(config)

@@ -441,8 +441,10 @@ def _load_background_review_usage(skill_usage: Any) -> Dict[str, Dict[str, Any]]
     so autonomous review must refuse rather than treat it as missing.
     """
     path = skill_usage._usage_file()
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return {}
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("usage sidecar is not a regular file")
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
         raise ValueError("usage sidecar is not an object map")
