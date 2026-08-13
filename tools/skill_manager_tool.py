@@ -303,7 +303,7 @@ def _background_review_write_guard(
     skill_dir: Path,
     action: str,
 ) -> Optional[Dict[str, Any]]:
-    """Refuse autonomous curator writes to externally owned skills.
+    """Refuse autonomous curator writes, except approved user-owned proposals.
 
     Foreground agents may still perform user-directed edits to external,
     bundled, or hub-installed skills. The background review fork is different:
@@ -337,6 +337,13 @@ def _background_review_write_guard(
             }
     except Exception:
         logger.debug("pinned skill guard lookup failed for %s", name, exc_info=True)
+        return {
+            "success": False,
+            "error": (
+                f"Refusing background curator {action} for skill '{name}': "
+                "pinned status could not be verified."
+            ),
+        }
 
     try:
         from agent.skill_utils import is_external_skill_path
@@ -351,6 +358,13 @@ def _background_review_write_guard(
             }
     except Exception:
         logger.debug("external skill guard lookup failed for %s", name, exc_info=True)
+        return {
+            "success": False,
+            "error": (
+                f"Refusing background curator {action} for skill '{name}': "
+                "external ownership could not be verified."
+            ),
+        }
 
     try:
         from tools import skill_usage
@@ -379,10 +393,8 @@ def _background_review_write_guard(
                 ),
             }
         # Skills that are not curator-managed are off-limits to autonomous
-        # curation. This prevents the LLM consolidation pass from mutating
-        # skills the user owns (manually authored, URL-installed, or created by
-        # a foreground `skill_manage(create)` at the user's request), which lack
-        # the `created_by: "agent"` marker.
+        # curation. A local user-owned edit may only become a pending proposal
+        # when the user has enabled skill write approval; it never applies here.
         #
         # A MISSING record and an explicit `created_by: null` must resolve
         # IDENTICALLY (issue #67140). Keying on `isinstance(usage_rec, dict)`
@@ -395,6 +407,8 @@ def _background_review_write_guard(
         usage_data = skill_usage.load_usage()
         usage_rec = usage_data.get(name)
         if not skill_usage._is_curator_managed_record(usage_rec):
+            if _background_review_can_stage_user_owned_write(action, skill_dir):
+                return None
             if isinstance(usage_rec, dict):
                 _detail = f"created_by={usage_rec.get('created_by')!r}"
             else:
@@ -419,6 +433,24 @@ def _background_review_write_guard(
             ),
         }
     return None
+
+
+def _background_review_can_stage_user_owned_write(action: str, skill_dir: Path) -> bool:
+    """Whether a background review may submit (but not apply) this user write."""
+    if action not in {"edit", "patch", "write_file", "remove_file"}:
+        return False
+    try:
+        resolved = skill_dir.resolve()
+        resolved.relative_to(_skills_dir().resolve())
+
+        from agent.skill_utils import is_org_mirror_path
+        if is_org_mirror_path(skill_dir, _skills_dir()):
+            return False
+
+        from tools import write_approval as wa
+        return wa.write_approval_enabled(wa.SKILLS)
+    except Exception:
+        return False
 
 
 def _background_review_read_before_write_guard(
@@ -452,6 +484,19 @@ def _background_review_read_before_write_guard(
 
 
 def _background_review_preflight(action: str, name: str) -> Optional[Dict[str, Any]]:
+    try:
+        from tools.skill_provenance import is_background_review
+        if action == "create" and is_background_review():
+            return {
+                "success": False,
+                "error": (
+                    "Refusing background curator create for skill "
+                    f"'{name}': autonomous review may only submit owner "
+                    "pending proposals for existing user-owned skills."
+                ),
+            }
+    except Exception:
+        pass
     if action not in {"edit", "patch", "delete", "write_file", "remove_file"}:
         return None
     existing = _find_skill(name)

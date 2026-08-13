@@ -18,6 +18,7 @@ from tools.skill_manager_tool import (
     _delete_skill,
     _write_file,
     _remove_file,
+    apply_skill_pending,
     skill_manage,
 )
 from agent.skill_utils import (
@@ -68,6 +69,10 @@ description: Use when deploying multi-region Kubernetes clusters with custom CNI
 
 Step 1.
 """
+
+
+def _raise_lookup_error(*_args, **_kwargs):
+    raise ValueError("unreadable")
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +380,8 @@ class TestSkillManageDispatcher:
                  patch("tools.skill_usage.is_hub_installed", return_value=False), \
                  patch("tools.skill_usage.is_bundled",
                        side_effect=lambda skill_name: skill_name == "bundled"):
-                skill_manage(action="create", name="umbrella", content=VALID_SKILL_CONTENT)
-                skill_manage(action="create", name="bundled", content=VALID_SKILL_CONTENT)
+                _create_skill("umbrella", VALID_SKILL_CONTENT)
+                _create_skill("bundled", VALID_SKILL_CONTENT)
                 raw = skill_manage(
                     action="delete",
                     name="bundled",
@@ -389,6 +394,320 @@ class TestSkillManageDispatcher:
         assert result["success"] is False
         assert "bundled" in result["error"].lower()
         assert (tmp_path / "bundled" / "SKILL.md").exists()
+
+
+class TestBackgroundReviewUserOwnedApprovalStaging:
+    """Background review can propose, but never directly mutate, user skills."""
+
+    def test_background_create_is_rejected_instead_of_staged(self, tmp_path, monkeypatch):
+        """The proposal exception applies only to existing user-owned skills."""
+        from hermes_cli.config import load_config, save_config
+        from tools import write_approval as wa
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        hermes_home = tmp_path / ".hermes"
+        skills_root = hermes_home / "skills"
+        skills_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        config = load_config()
+        config.setdefault("skills", {})["write_approval"] = True
+        save_config(config)
+
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                result = json.loads(skill_manage(
+                    action="create", name="user-skill", content=VALID_SKILL_CONTENT,
+                ))
+            finally:
+                reset_current_write_origin(token)
+
+        assert result["success"] is False
+        assert "create" in result["error"].lower()
+        assert wa.pending_count(wa.SKILLS) == 0
+        assert not (skills_root / "user-skill").exists()
+
+    @pytest.mark.parametrize(
+        ("action", "kwargs", "prepare", "assert_unchanged"),
+        [
+            (
+                "edit",
+                {"content": VALID_SKILL_CONTENT_2},
+                lambda skill_dir: None,
+                lambda skill_dir: "A test skill" in (skill_dir / "SKILL.md").read_text(),
+            ),
+            (
+                "patch",
+                {"old_string": "Do the thing.", "new_string": "Changed."},
+                lambda skill_dir: None,
+                lambda skill_dir: "Do the thing." in (skill_dir / "SKILL.md").read_text(),
+            ),
+            (
+                "write_file",
+                {"file_path": "references/new.md", "file_content": "new reference\n"},
+                lambda skill_dir: None,
+                lambda skill_dir: not (skill_dir / "references" / "new.md").exists(),
+            ),
+            (
+                "remove_file",
+                {"file_path": "references/existing.md"},
+                lambda skill_dir: (
+                    (skill_dir / "references").mkdir(exist_ok=True),
+                    (skill_dir / "references" / "existing.md").write_text("keep me\n"),
+                ),
+                lambda skill_dir: (skill_dir / "references" / "existing.md").exists(),
+            ),
+        ],
+    )
+    def test_user_owned_mutation_stages_with_approval_enabled(
+        self, tmp_path, monkeypatch, action, kwargs, prepare, assert_unchanged,
+    ):
+        """Breaking the approval stage must fail this by modifying the active skill."""
+        from hermes_cli.config import load_config, save_config
+        from tools import write_approval as wa
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        hermes_home = tmp_path / ".hermes"
+        skills_root = hermes_home / "skills"
+        skills_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+            assert json.loads(skill_manage(
+                action="create", name="user-skill", content=VALID_SKILL_CONTENT,
+            ))["success"] is True
+            skill_dir = skills_root / "user-skill"
+            prepare(skill_dir)
+
+            config = load_config()
+            config.setdefault("skills", {})["write_approval"] = True
+            save_config(config)
+
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                result = json.loads(skill_manage(action=action, name="user-skill", **kwargs))
+            finally:
+                reset_current_write_origin(token)
+
+        assert result["success"] is True, result
+        assert result["staged"] is True
+        assert assert_unchanged(skill_dir)
+        pending = wa.get_pending(wa.SKILLS, result["pending_id"])
+        assert pending is not None
+        assert pending["origin"] == BACKGROUND_REVIEW
+        assert pending["subsystem"] == wa.SKILLS
+        assert pending["action"] == action
+        assert pending["payload"] == {
+            "action": action,
+            "name": "user-skill",
+            "replace_all": False,
+            **kwargs,
+        }
+
+    def test_user_owned_background_write_fails_closed_when_approval_is_off(
+        self, tmp_path, monkeypatch,
+    ):
+        """Disabling approval never turns a background proposal into a direct write."""
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        hermes_home = tmp_path / ".hermes"
+        skills_root = hermes_home / "skills"
+        skills_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+            assert json.loads(skill_manage(
+                action="create", name="user-skill", content=VALID_SKILL_CONTENT,
+            ))["success"] is True
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                result = json.loads(skill_manage(
+                    action="patch", name="user-skill",
+                    old_string="Do the thing.", new_string="Changed.",
+                ))
+            finally:
+                reset_current_write_origin(token)
+
+        assert result["success"] is False
+        assert "user-owned" in result["error"].lower()
+        assert "Do the thing." in (skills_root / "user-skill" / "SKILL.md").read_text()
+
+    def test_user_owned_background_delete_is_rejected_instead_of_staged(
+        self, tmp_path, monkeypatch,
+    ):
+        """Only non-destructive user-owned mutations qualify for a pending proposal."""
+        from hermes_cli.config import load_config, save_config
+        from tools import write_approval as wa
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        hermes_home = tmp_path / ".hermes"
+        skills_root = hermes_home / "skills"
+        skills_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+            assert json.loads(skill_manage(
+                action="create", name="user-skill", content=VALID_SKILL_CONTENT,
+            ))["success"] is True
+            config = load_config()
+            config.setdefault("skills", {})["write_approval"] = True
+            save_config(config)
+
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                result = json.loads(skill_manage(action="delete", name="user-skill"))
+            finally:
+                reset_current_write_origin(token)
+
+        assert result["success"] is False
+        assert "user-owned" in result["error"].lower()
+        assert wa.pending_count(wa.SKILLS) == 0
+        assert (skills_root / "user-skill" / "SKILL.md").exists()
+
+    @pytest.mark.parametrize(
+        ("patch_target", "patch_value", "expected_error"),
+        [
+            ("tools.skill_usage.get_record", lambda name: {"pinned": True}, "pinned"),
+            ("tools.skill_usage.get_record", _raise_lookup_error, "could not be verified"),
+            ("agent.skill_utils.is_external_skill_path", lambda path: True, "externally owned"),
+            ("agent.skill_utils.is_external_skill_path", _raise_lookup_error, "could not be verified"),
+            ("tools.skill_usage.is_hub_installed", lambda name: True, "hub-installed"),
+            ("tools.skill_usage.is_bundled", lambda name: True, "bundled"),
+        ],
+    )
+    def test_protected_background_skill_is_rejected_instead_of_staged(
+        self, tmp_path, monkeypatch, patch_target, patch_value, expected_error,
+    ):
+        """Protected provenance always wins over the user-owned proposal exception."""
+        from hermes_cli.config import load_config, save_config
+        from tools import write_approval as wa
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        hermes_home = tmp_path / ".hermes"
+        skills_root = hermes_home / "skills"
+        skills_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+            assert json.loads(skill_manage(
+                action="create", name="user-skill", content=VALID_SKILL_CONTENT,
+            ))["success"] is True
+            config = load_config()
+            config.setdefault("skills", {})["write_approval"] = True
+            save_config(config)
+
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                with patch(patch_target, side_effect=patch_value):
+                    result = json.loads(skill_manage(
+                        action="patch", name="user-skill",
+                        old_string="Do the thing.", new_string="Changed.",
+                    ))
+            finally:
+                reset_current_write_origin(token)
+
+        assert result["success"] is False, result
+        assert expected_error in result["error"].lower()
+        assert wa.pending_count(wa.SKILLS) == 0
+        assert "Do the thing." in (skills_root / "user-skill" / "SKILL.md").read_text()
+
+    def test_ownership_lookup_error_is_rejected_instead_of_staged(self, tmp_path, monkeypatch):
+        """A missing provenance record cannot use the proposal exception."""
+        from hermes_cli.config import load_config, save_config
+        from tools import write_approval as wa
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        hermes_home = tmp_path / ".hermes"
+        skills_root = hermes_home / "skills"
+        skills_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+            assert json.loads(skill_manage(
+                action="create", name="user-skill", content=VALID_SKILL_CONTENT,
+            ))["success"] is True
+            config = load_config()
+            config.setdefault("skills", {})["write_approval"] = True
+            save_config(config)
+
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                with patch("tools.skill_usage.load_usage", side_effect=ValueError("corrupt")):
+                    result = json.loads(skill_manage(
+                        action="patch", name="user-skill",
+                        old_string="Do the thing.", new_string="Changed.",
+                    ))
+            finally:
+                reset_current_write_origin(token)
+
+        assert result["success"] is False
+        assert "could not be verified" in result["error"].lower()
+        assert wa.pending_count(wa.SKILLS) == 0
+        assert "Do the thing." in (skills_root / "user-skill" / "SKILL.md").read_text()
+
+    def test_approved_user_owned_proposal_replays_as_foreground_write(self, tmp_path, monkeypatch):
+        """A pending background proposal applies only after foreground approval replay."""
+        from hermes_cli.config import load_config, save_config
+        from tools import write_approval as wa
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        hermes_home = tmp_path / ".hermes"
+        skills_root = hermes_home / "skills"
+        skills_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+            assert json.loads(skill_manage(
+                action="create", name="user-skill", content=VALID_SKILL_CONTENT,
+            ))["success"] is True
+            config = load_config()
+            config.setdefault("skills", {})["write_approval"] = True
+            save_config(config)
+
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                staged = json.loads(skill_manage(
+                    action="patch", name="user-skill",
+                    old_string="Do the thing.", new_string="Approved change.",
+                ))
+            finally:
+                reset_current_write_origin(token)
+
+            pending = wa.get_pending(wa.SKILLS, staged["pending_id"])
+            replay = json.loads(apply_skill_pending(pending["payload"]))
+
+        assert staged["staged"] is True
+        assert replay["success"] is True, replay
+        assert "Approved change." in (skills_root / "user-skill" / "SKILL.md").read_text()
 
 
 class TestSecurityScanGate:
@@ -556,7 +875,7 @@ class TestExternalSkillMutations:
 
         result = json.loads(raw)
         assert result["success"] is False
-        assert "ownership" in result["error"].lower()
+        assert "could not be verified" in result["error"].lower()
         assert "Do the thing." in (
             tmp_path / "manual-skill" / "SKILL.md"
         ).read_text(encoding="utf-8")
