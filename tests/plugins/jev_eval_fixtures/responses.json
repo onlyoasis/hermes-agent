@@ -1,0 +1,175 @@
+{
+  "schema_version": "jev-skill-eval-responses-v1",
+  "note": "Scripted vendor answers for runner plumbing verification only. Probabilities and usage are FIXTURE numbers — a scripted run says nothing about model quality; latency is not measured.",
+  "responses": {
+    "syn-dev-001": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-image-tools", "probabilities": {"syn-image-tools": 0.85, "syn-translator": 0.05, "syn-diary-summary": 0.04, "syn-data-chart": 0.03, "none": 0.03}},
+            "any_match": {"type": "noul", "noul": 0.85}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        },
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-image-tools", "probabilities": {"syn-image-tools": 0.85, "syn-translator": 0.07, "syn-diary-summary": 0.05, "none": 0.03}},
+            "fits::syn-image-tools": {"type": "noul", "noul": 0.9},
+            "fits::syn-translator": {"type": "noul", "noul": 0.2},
+            "fits::syn-diary-summary": {"type": "noul", "noul": 0.1}
+          },
+          "usage": {"input_tokens": 300, "output_tokens": 20}
+        }
+      ]
+    },
+    "syn-dev-002": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-image-tools", "probabilities": {"syn-image-tools": 0.80, "syn-translator": 0.06, "syn-diary-summary": 0.05, "syn-data-chart": 0.04, "none": 0.05}},
+            "any_match": {"type": "noul", "noul": 0.8}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        },
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "none", "probabilities": {"none": 0.70, "syn-image-tools": 0.15, "syn-translator": 0.08, "syn-diary-summary": 0.07}},
+            "fits::syn-image-tools": {"type": "noul", "noul": 0.3},
+            "fits::syn-translator": {"type": "noul", "noul": 0.2},
+            "fits::syn-diary-summary": {"type": "noul", "noul": 0.1}
+          },
+          "usage": {"input_tokens": 300, "output_tokens": 20}
+        }
+      ]
+    },
+    "syn-dev-003": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "none", "probabilities": {"none": 0.92, "syn-image-tools": 0.02, "syn-translator": 0.02, "syn-diary-summary": 0.02, "syn-data-chart": 0.02}},
+            "any_match": {"type": "noul", "noul": 0.05}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        }
+      ]
+    },
+    "syn-dev-004": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "none", "probabilities": {"none": 0.80, "syn-image-tools": 0.06, "syn-translator": 0.05, "syn-diary-summary": 0.05, "syn-data-chart": 0.04}},
+            "any_match": {"type": "noul", "noul": 0.1}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        }
+      ]
+    },
+    "syn-dev-005": {
+      "phases": [
+        {"error": "JevTimeoutError"}
+      ]
+    },
+    "syn-val-001": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-translator", "probabilities": {"syn-translator": 0.80, "syn-image-tools": 0.06, "syn-diary-summary": 0.05, "syn-data-chart": 0.04, "none": 0.05}},
+            "any_match": {"type": "noul", "noul": 0.8}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        },
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-translator", "probabilities": {"syn-translator": 0.85, "syn-image-tools": 0.07, "syn-diary-summary": 0.05, "none": 0.03}},
+            "fits::syn-translator": {"type": "noul", "noul": 0.9},
+            "fits::syn-image-tools": {"type": "noul", "noul": 0.1},
+            "fits::syn-diary-summary": {"type": "noul", "noul": 0.2}
+          },
+          "usage": {"input_tokens": 300, "output_tokens": 20}
+        }
+      ]
+    },
+    "syn-val-002": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-diary-summary", "probabilities": {"syn-diary-summary": 0.82, "syn-translator": 0.06, "syn-image-tools": 0.05, "syn-data-chart": 0.03, "none": 0.04}},
+            "any_match": {"type": "noul", "noul": 0.85}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        },
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-diary-summary", "probabilities": {"syn-diary-summary": 0.85, "syn-translator": 0.08, "syn-image-tools": 0.04, "none": 0.03}},
+            "fits::syn-diary-summary": {"type": "noul", "noul": 0.9},
+            "fits::syn-translator": {"type": "noul", "noul": 0.1},
+            "fits::syn-image-tools": {"type": "noul", "noul": 0.1}
+          },
+          "usage": {"input_tokens": 300, "output_tokens": 20}
+        }
+      ]
+    },
+    "syn-fin-001": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-image-tools", "probabilities": {"syn-image-tools": 0.86, "syn-diary-summary": 0.05, "syn-translator": 0.04, "syn-data-chart": 0.02, "none": 0.03}},
+            "any_match": {"type": "noul", "noul": 0.85}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        },
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-image-tools", "probabilities": {"syn-image-tools": 0.85, "syn-diary-summary": 0.08, "syn-translator": 0.04, "none": 0.03}},
+            "fits::syn-image-tools": {"type": "noul", "noul": 0.9},
+            "fits::syn-diary-summary": {"type": "noul", "noul": 0.2},
+            "fits::syn-translator": {"type": "noul", "noul": 0.1}
+          },
+          "usage": {"input_tokens": 300, "output_tokens": 20}
+        }
+      ]
+    },
+    "syn-fin-002": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-image-tools", "probabilities": {"syn-image-tools": 0.84, "syn-translator": 0.05, "syn-diary-summary": 0.04, "syn-data-chart": 0.03, "none": 0.04}},
+            "any_match": {"type": "noul", "noul": 0.8}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        },
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "syn-image-tools", "probabilities": {"syn-image-tools": 0.88, "syn-translator": 0.05, "syn-diary-summary": 0.04, "none": 0.03}},
+            "fits::syn-image-tools": {"type": "noul", "noul": 0.88},
+            "fits::syn-translator": {"type": "noul", "noul": 0.1},
+            "fits::syn-diary-summary": {"type": "noul", "noul": 0.1}
+          },
+          "usage": {"input_tokens": 300, "output_tokens": 20}
+        }
+      ]
+    },
+    "syn-fin-003": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "none", "probabilities": {"none": 0.88, "syn-image-tools": 0.03, "syn-translator": 0.03, "syn-diary-summary": 0.03, "syn-data-chart": 0.03}},
+            "any_match": {"type": "noul", "noul": 0.05}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        }
+      ]
+    },
+    "syn-fin-004": {
+      "phases": [
+        {
+          "answers": {
+            "which": {"type": "choice", "choice": "none", "probabilities": {"none": 0.80, "syn-image-tools": 0.06, "syn-translator": 0.05, "syn-diary-summary": 0.05, "syn-data-chart": 0.04}},
+            "any_match": {"type": "noul", "noul": 0.08}
+          },
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "schema_version": "jev-skill-eval-cases-v1",
+  "provenance": {
+    "origin": "synthetic",
+    "purpose": "Runner self-verification only: plumbing, metric classification, denominators. NOT model-quality evidence and NOT a substitute for the 300-case natural gold set (plan §6).",
+    "authored": "2026-09-24",
+    "note": "Clearly-labeled synthetic fixtures kept in-repo for offline tests; natural/sanitised case files live OUTSIDE the repository and are passed to the runner by path."
+  },
+  "cases": [
+    {
+      "case_id": "syn-dev-001",
+      "group_id": "g-image-dev",
+      "split": "dev",
+      "origin": "synthetic",
+      "user_message": "帮我画一张日落风景图",
+      "expectation": {"kind": "recommend", "skill_id": "syn-image-tools"}
+    },
+    {
+      "case_id": "syn-dev-002",
+      "group_id": "g-image-dev",
+      "split": "dev",
+      "origin": "synthetic",
+      "user_message": "来一张海边黄昏的插画",
+      "expectation": {"kind": "recommend", "skill_id": "syn-image-tools"}
+    },
+    {
+      "case_id": "syn-dev-003",
+      "group_id": "g-weather-dev",
+      "split": "dev",
+      "origin": "synthetic",
+      "user_message": "今天天气怎么样",
+      "expectation": {"kind": "no_skill"}
+    },
+    {
+      "case_id": "syn-dev-004",
+      "group_id": "g-room-dev",
+      "split": "dev",
+      "origin": "synthetic",
+      "user_message": "帮我预订明天下午的会议室",
+      "expectation": {"kind": "unsupported"}
+    },
+    {
+      "case_id": "syn-dev-005",
+      "group_id": "g-image-timeout",
+      "split": "dev",
+      "origin": "synthetic",
+      "user_message": "给我做一张生日贺卡图片",
+      "expectation": {"kind": "recommend", "skill_id": "syn-image-tools"}
+    },
+    {
+      "case_id": "syn-dev-006",
+      "group_id": "g-explicit-dev",
+      "split": "dev",
+      "origin": "synthetic",
+      "user_message": "直接用 syn-translator 把这句话翻成英文",
+      "expectation": {"kind": "explicit_skill", "skill_id": "syn-translator"}
+    },
+    {
+      "case_id": "syn-val-001",
+      "group_id": "g-translator-val",
+      "split": "threshold_validation",
+      "origin": "synthetic",
+      "user_message": "这句话用英文怎么说",
+      "expectation": {"kind": "recommend", "skill_id": "syn-translator"}
+    },
+    {
+      "case_id": "syn-val-002",
+      "group_id": "g-diary-val",
+      "split": "threshold_validation",
+      "origin": "synthetic",
+      "user_message": "把我这周的日记整理成几个要点",
+      "expectation": {"kind": "recommend", "skill_id": "syn-diary-summary"}
+    },
+    {
+      "case_id": "syn-fin-001",
+      "group_id": "g-image-fin",
+      "split": "final_test",
+      "origin": "synthetic",
+      "user_message": "我想把这张照片调成暖色调",
+      "expectation": {"kind": "recommend", "skill_id": "syn-image-tools"}
+    },
+    {
+      "case_id": "syn-fin-002",
+      "group_id": "g-image-fin",
+      "split": "final_test",
+      "origin": "synthetic",
+      "user_message": "帮我的照片加一个日落的滤镜",
+      "expectation": {"kind": "recommend", "skill_id": "syn-image-tools"}
+    },
+    {
+      "case_id": "syn-fin-003",
+      "group_id": "g-nohelp-fin",
+      "split": "final_test",
+      "origin": "synthetic",
+      "user_message": "谢谢，我知道了",
+      "expectation": {"kind": "no_skill"}
+    },
+    {
+      "case_id": "syn-fin-004",
+      "group_id": "g-unsupported-fin",
+      "split": "final_test",
+      "origin": "synthetic",
+      "user_message": "帮我查一下这周六的演唱会门票还有没有",
+      "expectation": {"kind": "unsupported", "forbidden_skill_ids": ["profile-x-secret"]}
+    }
+  ]
+}

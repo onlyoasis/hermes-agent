@@ -95,6 +95,9 @@ class _Outcome:
         self.catalog_revision = ""
         self.candidate_ids: List[str] = []
         self.usage: Optional[Mapping[str, Any]] = None
+        # Every response's usage, in call order (the offline evaluation
+        # runner reads this; "usage" above stays the latest for advice).
+        self.usage_log: List[Mapping[str, Any]] = []
         self.started = time.monotonic()
         self.elapsed_ms = 0.0
 
@@ -106,7 +109,9 @@ class _Outcome:
         return self.elapsed_ms
 
 
-def _route_turn(kwargs: Mapping[str, Any]) -> Optional[Dict[str, str]]:
+def _route_turn(
+    kwargs: Mapping[str, Any], *, client_factory: Any = None
+) -> Optional[Dict[str, str]]:
     cfg, _config_errors = policy.load_router_config()
     home = _hermes_home()
     outcome = _Outcome(cfg, cfg.mode)
@@ -177,7 +182,7 @@ def _route_turn(kwargs: Mapping[str, Any]) -> Optional[Dict[str, str]]:
     try:
         return _run_two_phase(
             cfg, home, outcome, policy.BudgetLedger(home, cfg.daily_budget_usd),
-            api_key, request_text, compiled,
+            api_key, request_text, compiled, client_factory=client_factory,
         )
     finally:
         outcome.tick()
@@ -213,6 +218,7 @@ def _run_two_phase(
     api_key: str,
     request_text: str,
     compiled: catalog_mod.CompiledCatalog,
+    client_factory: Any = None,
 ) -> Optional[Dict[str, str]]:
     def finish(status: str, reason_code: str, skill_id: str = "") -> Optional[Dict[str, str]]:
         return _finish(outcome, home, status, reason_code, skill_id)
@@ -226,7 +232,11 @@ def _run_two_phase(
     reservation, reason = _reserve_for_payload(cfg, ledger, state, phase_one)
     if reservation is None:
         return finish("skipped", reason)
-    api_client = client_mod.JevClient(api_key, cfg.model, base_url=cfg.base_url)
+    # Client seam: production builds the real vendor client; the offline
+    # evaluation runner injects a scripted responder here (same interface,
+    # no network). Everything else — gating, budget, thresholds, records —
+    # is the unmodified production path.
+    api_client = (client_factory or _default_jev_client)(api_key, cfg)
 
     phase_one_ms = int(cfg.total_deadline_ms * _PHASE_ONE_DEADLINE_SHARE)
     try:
@@ -237,6 +247,7 @@ def _run_two_phase(
         ledger.settle(reservation, None, cfg.price_input_per_mtok, cfg.price_output_per_mtok)
         return finish("unavailable", _error_reason(exc))
     outcome.usage = response.get("usage") if isinstance(response, dict) else None
+    outcome.usage_log.append(outcome.usage)
     ledger.settle(reservation, outcome.usage, cfg.price_input_per_mtok, cfg.price_output_per_mtok)
 
     try:
@@ -278,6 +289,7 @@ def _run_two_phase(
         ledger.settle(reservation2, None, cfg.price_input_per_mtok, cfg.price_output_per_mtok)
         return finish("unavailable", _error_reason(exc, "phase2"))
     outcome.usage = response2.get("usage") if isinstance(response2, dict) else None
+    outcome.usage_log.append(outcome.usage)
     ledger.settle(reservation2, outcome.usage, cfg.price_input_per_mtok, cfg.price_output_per_mtok)
 
     try:
@@ -350,6 +362,9 @@ def _finish(
         "reason_code": reason_code,
         "elapsed_ms": outcome.elapsed_ms,
         "usage": dict(outcome.usage) if outcome.usage else None,
+        # Full per-call usage trail (no user text, plan §5): lets the
+        # offline evaluation runner total tokens across both phases.
+        "usage_all": [dict(u) if u else None for u in outcome.usage_log],
     }
     policy.append_decision_record(home, record)
     return None
@@ -358,6 +373,11 @@ def _finish(
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+def _default_jev_client(api_key: str, cfg: policy.RouterConfig) -> Any:
+    """Production client factory (the client seam's default)."""
+    return client_mod.JevClient(api_key, cfg.model, base_url=cfg.base_url)
+
 
 def _hermes_home():
     from hermes_constants import get_hermes_home
