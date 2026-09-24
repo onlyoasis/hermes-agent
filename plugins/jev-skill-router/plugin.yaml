@@ -1,0 +1,7 @@
+name: jev-skill-router
+version: 0.1.0
+description: "Optional Jev (TypeSafe) skill-recommendation router. Suggests at most one already-loadable skill per user turn via a two-phase Choice/Noul flow; default mode is off, shadow mode never injects, and every failure path falls back to the unmodified skill flow. Registers hooks only — no tools, no permission surface."
+kind: standalone
+provides_hooks:
+  - pre_llm_call
+  - on_session_end
