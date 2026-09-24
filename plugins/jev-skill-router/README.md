@@ -5,9 +5,9 @@ Choice/Noul 问题判断"当前请求是否适合加载某个**已可加载**的
 至多推荐一个技能，以固定模板注入**本轮**的 user message API 副本
 （不改 system prompt、不进入后续轮次）。
 
-设计蓝图：`docs/jev-skill-recommendation-plan.md`。本目录是方案 §7
-D1 阶段的离线实现：全部逻辑经真实函数 + 假响应测试验证，**尚未**
-接通真实 API，也未在生产 shared install 上启用。
+设计蓝图：`docs/jev-skill-recommendation-plan.md`。本目录已完成 D1 离线实现，
+并用专用密钥、合成样本接通真实 API。2026-09-24 仅在超级助理独立
+Profile 以 `shadow` 模式启用；自然中文样本与 `recommend` 效果尚未验收。
 
 ## 安全边界（方案 §1/§3/§4 的硬约束）
 
@@ -164,7 +164,8 @@ python scripts/jev_skill_eval.py \
 python scripts/jev_skill_eval.py \
   --cases /path/to/jev-cases-300.json \
   --skills-dir /path/to/frozen-skills \
-  --out-dir <外盘路径>/eval-d2 --responder live --acknowledge-cost
+  --out-dir <外盘路径>/eval-d2 --responder live --acknowledge-cost \
+  --total-deadline-ms 4000
 ```
 
 - 案例文件 schema `jev-skill-eval-cases-v1`：每条含
@@ -191,11 +192,13 @@ python scripts/jev_skill_eval.py \
 - `--responder live` 为独立显式入口：必须同时
   `--acknowledge-cost` 且 API key 环境变量存在，缺任一在任何输出
   目录创建之前拒绝；绝不混入默认单元测试。
+- `--total-deadline-ms` 控制每轮路由总时限，默认 2000；真实 API
+  评测可用更长时限观察超时与延迟的权衡，报告会记录实际值。
 - 报告 `report.json` 含 git rev、插件版本、问题版本、目录修订
   （n4-…）、阈值/预算、输入文件 SHA256、技能清单与最终账本；
   `cases.jsonl` 逐案例结果；两者均不含用户原文。
 
-## 未完成项（后续阶段）
+## 当前实测与后续验收
 
 - **D2 真实评测数据**：harness 已就绪，但尚无 300 条自然中文金标
   样本（需用户真实案例脱敏 + 独立人工审阅金标）；阈值
@@ -205,6 +208,13 @@ python scripts/jev_skill_eval.py \
 - **D3 shared install 实证**：gateway 审批/控制命令是否产生用户轮次、
   各平台表面标记的真实取值，需在 shared install 环境验证后再扩
   `allowed_platforms`；本仓库不做生产接入。
-- **真实 API 联调**：`client.py` 的 default transport 走真实网络前，
-  需要外发授权与凭据；当前只有离线假响应验证。
+- **真实 API 与影子模式**：2026-09-24 用固定 `jev-1.13.0`、12 条合成
+  案例实测：8 正确、3 漏召回、1 超时；阈值验证组 0/2，15 次请求的
+  实际费用 $0.000447216。A 臂现有 Agent 行为仍未验证，合成结果不得
+  当作自然准确率。当前生产 Profile 仅允许 12 个技能的元数据外发，
+  仅限飞书用户轮次、每请求最多 5000 输入 token、每日最多 $0.01、
+  每轮 4000ms；合成 Word 请求的真实 hook 返回空上下文，审计记录
+  `docx` 候选、2 次请求、1678ms。密钥保存在私有外盘 0600 文件，
+  不进入仓库或 Profile 配置。运行 release 仍为 `7ba20901b`，
+  本轮新增评测时限参数只影响评测器。
 - CLI 表面、跨轮缓存（方案明确 v1 不做）。

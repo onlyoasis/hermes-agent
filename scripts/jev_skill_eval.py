@@ -88,6 +88,8 @@ def _parse_args(argv=None):
                         help="keyword-baseline threshold (arm B parameter)")
     parser.add_argument("--daily-budget-usd", type=float, default=1.0)
     parser.add_argument("--max-input-tokens", type=int, default=200000)
+    parser.add_argument("--total-deadline-ms", type=int, default=2000,
+                        help="overall Jev routing deadline per turn; use to compare latency tradeoffs")
     return parser.parse_args(argv)
 
 
@@ -137,6 +139,7 @@ def main(argv=None) -> int:
             min_choice_prob=args.min_choice_prob,
             daily_budget_usd=args.daily_budget_usd,
             max_input_tokens=args.max_input_tokens,
+            total_deadline_ms=args.total_deadline_ms,
             kw_min_score=args.kw_min_score,
             split_filter=set(args.split) if args.split else None,
             acknowledge_cost=args.acknowledge_cost,

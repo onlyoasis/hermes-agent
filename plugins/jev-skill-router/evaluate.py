@@ -413,6 +413,7 @@ def run_evaluation(
     min_choice_prob: float = 0.5,
     daily_budget_usd: float = 1.0,
     max_input_tokens: int = 200000,
+    total_deadline_ms: int = 2000,
     model: str = "jev-1.13.0",
     kw_min_score: int = 2,
     split_filter: Optional[Set[str]] = None,
@@ -426,6 +427,8 @@ def run_evaluation(
     at the client seam. Returns the report mapping."""
     if responder not in ("scripted", "live"):
         raise EvalInputError(f"responder must be 'scripted' or 'live' (got {responder!r})")
+    if type(total_deadline_ms) is not int or not 200 <= total_deadline_ms <= 60000:
+        raise EvalInputError("total_deadline_ms must be an integer from 200 to 60000")
     if responder == "scripted" and responses_path is None:
         raise EvalInputError("scripted responder requires responses_path")
     if responder == "live":
@@ -450,7 +453,8 @@ def run_evaluation(
                               min_any_match=min_any_match, min_fit=min_fit,
                               min_choice_prob=min_choice_prob,
                               daily_budget_usd=daily_budget_usd,
-                              max_input_tokens=max_input_tokens)
+                              max_input_tokens=max_input_tokens,
+                              total_deadline_ms=total_deadline_ms)
     saved_env = {key: os.environ.get(key) for key in ("HERMES_HOME", api_key_env)}
     os.environ["HERMES_HOME"] = str(home)
     if responder == "scripted":
@@ -492,7 +496,8 @@ def run_evaluation(
                                "min_choice_prob": min_choice_prob,
                                "kw_min_score": kw_min_score},
                 "budget": {"daily_budget_usd": daily_budget_usd,
-                           "max_input_tokens": max_input_tokens},
+                           "max_input_tokens": max_input_tokens,
+                           "total_deadline_ms": total_deadline_ms},
                 "inputs": _input_manifest(cases_path, responses_path),
                 "skills_manifest": sorted(compiled.ids()),
                 "split_case_counts": _split_counts(cases),

@@ -420,6 +420,13 @@ class TestRunnerScriptedE2E:
         ids = [c["case_id"] for c in report["arms"]["jev_router"]["per_case"]]
         assert ids and all(i.startswith("syn-dev") for i in ids)
 
+    def test_deadline_override_reaches_isolated_profile_and_report(self, evaluate, tmp_path):
+        report = self._run(evaluate, tmp_path, total_deadline_ms=4000)
+        profile = (tmp_path / "out" / "eval-home" / "config.yaml").read_text(
+            encoding="utf-8")
+        assert "total_deadline_ms: 4000" in profile
+        assert report["run"]["budget"]["total_deadline_ms"] == 4000
+
 
 # ---------------------------------------------------------------------------
 # Failure honesty & live-mode guard
@@ -461,3 +468,11 @@ class TestFailureHonesty:
             evaluate.run_evaluation(
                 cases_path=CASES_PATH, skills_dir=SKILLS_DIR, out_dir=tmp_path / "out",
                 responder="dream")
+
+    def test_invalid_deadline_rejected_before_output(self, evaluate, tmp_path):
+        with pytest.raises(evaluate.EvalInputError, match="total_deadline_ms"):
+            self_out = tmp_path / "out"
+            evaluate.run_evaluation(
+                cases_path=CASES_PATH, skills_dir=SKILLS_DIR, out_dir=self_out,
+                responses_path=RESPONSES_PATH, total_deadline_ms=0)
+        assert not (tmp_path / "out").exists()
